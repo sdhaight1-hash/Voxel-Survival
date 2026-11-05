@@ -73,9 +73,10 @@ impl Terrain {
     pub fn height(&self,x:i32,y:i32) -> i32 {
         let (x,y)=Self::lab_xy(x,y);
         let radius=x.hypot(y);
-        // A coastal shelf rises from seabed +76m to dry inland +140m.
-        // Beyond 410m radius the floor is level: both torus seams match.
-        let island=((410.0-radius)/115.0).clamp(0.0,1.0);
+        // Broad coastal ramp: ~52m of rise spread across 240m, not the
+        // former steep 115m band. The inland plateau is easy to traverse.
+        // Outside radius 465m the seabed is flat at Z=76 on every seam.
+        let island=((465.0-radius)/240.0).clamp(0.0,1.0);
         let island=island*island*(3.0-2.0*island);
         let phase_x=std::f64::consts::TAU*wrap(x as i32+WORLD_SIZE/2) as f64/WORLD_SIZE as f64;
         let phase_y=std::f64::consts::TAU*wrap(y as i32+WORLD_SIZE/2) as f64/WORLD_SIZE as f64;
@@ -83,30 +84,30 @@ impl Terrain {
             phase_x.cos()*32.0,phase_x.sin()*32.0,
             phase_y.cos()*32.0,phase_y.sin()*32.0,
         ]);
-        let mut h=76.0+island*(64.0+noise*12.0
-            +3.0*(x/26.0).sin()*(y/31.0).cos());
+        let mut h=76.0+island*(52.0+noise*1.8
+            +1.4*(x/58.0).sin()*(y/66.0).cos());
 
         // Basin above sea level: the lake has a level surface at +126m.
         let lake=Self::lake_distance(x,y);
-        if lake<86.0 {
-            let bed=111.0+15.0*(lake/76.0).powi(2);
-            let blend=((86.0-lake)/12.0).clamp(0.0,1.0);
+        if lake<112.0 {
+            let bed=115.0+10.0*(lake/78.0).powi(2);
+            let blend=((112.0-lake)/34.0).clamp(0.0,1.0);
             h=h*(1.0-blend)+h.min(bed)*blend;
         }
         // Winding channel with sloping bed; broad banks are dry and only
         // its central 9m are initially inundated.
         if let Some((distance,surface))=Self::river(x,y) {
-            if distance<19.0 {
-                let bed=surface-3.0+0.1*(x/12.0).sin();
-                let blend=((19.0-distance)/10.0).clamp(0.0,1.0);
+            if distance<30.0 {
+                let bed=surface-2.0+0.1*(x/20.0).sin();
+                let blend=((30.0-distance)/21.0).clamp(0.0,1.0);
                 h=h*(1.0-blend)+h.min(bed)*blend;
             }
         }
         // Small dry hummocks and shallow wet pockets in a low marsh basin.
         let swamp=Self::swamp_distance(x,y);
-        if swamp<1.15 {
-            let bed=113.0+3.5*(x/12.0).sin()*(y/9.0).cos();
-            let blend=((1.15-swamp)/0.22).clamp(0.0,1.0);
+        if swamp<1.5 {
+            let bed=114.5+1.6*(x/26.0).sin()*(y/24.0).cos();
+            let blend=((1.5-swamp)/0.5).clamp(0.0,1.0);
             h=h*(1.0-blend)+h.min(bed)*blend;
         }
         h.round().clamp(2.0,250.0) as i32
@@ -172,6 +173,21 @@ mod tests {
     fn starting_area_is_dry() {
         let t = Terrain::new();
         assert!(t.height(WORLD_SIZE / 2, WORLD_SIZE / 2) > SEA_LEVEL + 2);
+    }
+    #[test]
+    fn inland_ground_is_gently_rolling_and_walkable() {
+        let t=Terrain::new();
+        let m=WORLD_SIZE/2;
+        // A representative path from spawn toward the wetland, remaining
+        // outside its intentionally excavated shallow water pockets.
+        let path:(Vec<i32>,i32)=((-100..=110).collect(),m-35);
+        let heights:Vec<_>=path.0.iter().map(|&dx|t.height(m+dx,path.1)).collect();
+        let spread=heights.iter().max().unwrap()-heights.iter().min().unwrap();
+        assert!(spread<=8,"inland plateau too uneven: {spread}m");
+        for pair in heights.windows(2) {
+            assert!((pair[1]-pair[0]).abs()<=1,
+                "rolling terrain created a tall walking wall: {:?}",pair);
+        }
     }
     #[test]
     fn island_has_ocean_on_all_seams_and_dry_center() {
