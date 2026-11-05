@@ -304,7 +304,10 @@ mod tests {
         t.water_assign((x,y,bed),90);
         let before=t.water_mass_error_liters();
         t.step_soil(72_000.0,128);
-        assert_eq!(t.water_liters(x,y,bed),90);
+        // Saturated soil absorbs nothing, but its finite groundwater store
+        // may discharge an 80 L spring over this 20-hour interval.
+        assert_eq!(t.water_liters(x,y,bed),170);
+        assert_eq!(t.groundwater_liters(x,y),920);
         assert_eq!(t.soil_moisture_liters(x,y),400);
         assert_eq!(t.water_mass_error_liters(),before);
     }
