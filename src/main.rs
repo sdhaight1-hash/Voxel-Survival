@@ -29,6 +29,7 @@ const MOUSE_SENSITIVITY: f32 = 0.002;
 struct CameraUniform {
     view_proj: [[f32; 4]; 4],
     viewport: [f32; 4],
+    sunlight: [f32; 4],
 }
 
 struct Player {
@@ -216,6 +217,9 @@ struct Game {
     last_frame: Instant,
     physics_accumulator: f32,
     water_accumulator: f32,
+    world_time_seconds: f64,
+    surface_temperature: geoscience::ThermalCell,
+    sunlight: f32,
 }
 
 fn depth_view(device: &wgpu::Device, size: PhysicalSize<u32>) -> wgpu::TextureView {
@@ -260,6 +264,7 @@ impl Game {
             contents: bytemuck::bytes_of(&CameraUniform {
                 view_proj: Mat4::IDENTITY.to_cols_array_2d(),
                 viewport: [size.width as f32, size.height as f32, 0.0, 0.0],
+                sunlight: [1.0,0.0,0.0,0.0],
             }),
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
         });
@@ -433,6 +438,9 @@ impl Game {
             chunks:Vec::new(),chunk_offsets,
             mesh_origin:(0,0),terrain,player,selected:Block::Dirt,
             keys:HashSet::new(),mouse_captured:false,last_frame:Instant::now(),physics_accumulator:0.0,water_accumulator:0.0,
+            world_time_seconds:0.0,
+            surface_temperature:geoscience::ThermalCell {temperature_c:15.0},
+            sunlight:1.0,
         };
         game.rebuild();
         game
@@ -514,6 +522,21 @@ impl Game {
         let now = Instant::now();
         let frame_dt = now.duration_since(self.last_frame).as_secs_f32().min(0.1);
         self.last_frame = now;
+        self.world_time_seconds += frame_dt as f64;
+        // Twenty real minutes per simulated day, 120 days per year.
+        // The solar model uses continuous energy in W/m²; thermal integration
+        // receives matching simulated seconds, not render-frame counts.
+        let solar_time = geoscience::SolarTime {
+            day_fraction:(self.world_time_seconds/1200.0).fract(),
+            year_fraction:(0.25+self.world_time_seconds/(1200.0*120.0)).fract(),
+            ..Default::default()
+        };
+        let solar = geoscience::solar_flux_w_m2(
+            self.player.pos.x as i32,self.player.pos.y as i32,solar_time,
+        );
+        self.sunlight=(solar/950.0).clamp(0.0,1.0) as f32;
+        self.surface_temperature.advance(solar,geoscience::Surface::Grass,
+            300.0,0.0,frame_dt as f64*72.0);
         self.physics_accumulator += frame_dt;
         let mut ticks = 0;
         while self.physics_accumulator >= PHYSICS_DT && ticks < 12 {
@@ -543,6 +566,7 @@ impl Game {
         let uniform = CameraUniform {
             view_proj:(proj*view).to_cols_array_2d(),
             viewport:[self.config.width as f32,self.config.height as f32,0.0,0.0],
+            sunlight:[self.sunlight,0.0,0.0,0.0],
         };
         self.queue.write_buffer(&self.camera_buffer,0,bytemuck::bytes_of(&uniform));
     }
@@ -570,6 +594,7 @@ impl Game {
     fn render(&mut self) -> Result<(),wgpu::SurfaceError> {
         let frame = self.surface.get_current_texture()?;
         let view = frame.texture.create_view(&Default::default());
+        let sun=self.sunlight as f64;
         let mut encoder = self.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {label:Some("frame")});
         {
             let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
@@ -577,7 +602,7 @@ impl Game {
                 color_attachments:&[Some(wgpu::RenderPassColorAttachment {
                     view:&view,resolve_target:None,
                     ops:wgpu::Operations {
-                        load:wgpu::LoadOp::Clear(wgpu::Color {r:0.49,g:0.67,b:0.79,a:1.0}),
+                        load:wgpu::LoadOp::Clear(wgpu::Color {r:0.025+0.465*sun,g:0.035+0.635*sun,b:0.065+0.725*sun,a:1.0}),
                         store:wgpu::StoreOp::Store,
                     },
                 })],
