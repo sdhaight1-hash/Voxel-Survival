@@ -22,6 +22,8 @@ pub struct SoilState {
     // Signed changes from the implicit baseline in finite topsoil storage.
     pub delta_soil_liters:i64,
     pub groundwater_liters:u64,
+    // Fractional signed flow debts along canonical east/north edges.
+    groundwater_flux_remainder:HashMap<(Column,u8),f64>,
 }
 impl SoilState {
     pub fn activate(&mut self,(x,y):Column) {
@@ -173,12 +175,102 @@ impl Terrain {
             if (surface>0 && column.moisture_l<mat.capacity_l)
                 || (column.moisture_l>mat.field_capacity_l
                     && column.groundwater_l<1000)
-                || column.groundwater_l>900 {
+                || column.groundwater_l>0 {
                 self.soil.active.insert(key);
             }
         }
         changed
     }
+    /// Conservative lateral groundwater exchange with a specific-yield
+    /// approximation: 200 liters/m2 change the water table by 1 meter.
+    /// Edge fluxes share one initial snapshot and are committed together.
+    /// Small fractional flows are retained between climate steps, so 1x
+    /// time and F1 time-lapse do not suppress slow subsurface movement.
+    pub fn step_groundwater(&mut self,dt_climate_seconds:f64,max_columns:usize)->usize {
+        if dt_climate_seconds<=0.0 {return 0;}
+        let mut active:Vec<Column>=self.soil.active.iter().copied().collect();
+        active.sort_unstable();
+        active.truncate(max_columns);
+        let mut edges=HashSet::new();
+        for (x,y) in active {
+            edges.insert(((x,y),0u8)); // east
+            edges.insert(((x,y),1u8)); // north
+            edges.insert(((wrap(x-1),y),0u8)); // west neighbor's east edge
+            edges.insert(((x,wrap(y-1)),1u8)); // south neighbor's north edge
+        }
+        let mut edges:Vec<_>=edges.into_iter().collect();
+        edges.sort_unstable();
+        let mut taken:HashMap<Column,u16>=HashMap::new();
+        let mut received:HashMap<Column,u16>=HashMap::new();
+        let mut changed=0;
+        for edge @ (from_edge,axis) in edges {
+            let target=if axis==0 {(wrap(from_edge.0+1),from_edge.1)}
+                else {(from_edge.0,wrap(from_edge.1+1))};
+            if SoilMaterial::from_terrain(self,from_edge.0,from_edge.1).capacity_l==0
+                || SoilMaterial::from_terrain(self,target.0,target.1).capacity_l==0 {
+                self.soil.groundwater_flux_remainder.remove(&edge);
+                continue;
+            }
+            let left=self.groundwater_liters(from_edge.0,from_edge.1);
+            let right=self.groundwater_liters(target.0,target.1);
+            // Equal hydraulic heads do not flow, even with different fill
+            // fractions. The 6m datum cancels between neighboring columns.
+            let head_left=self.height(from_edge.0,from_edge.1) as f64
+                +left as f64/200.0;
+            let head_right=self.height(target.0,target.1) as f64
+                +right as f64/200.0;
+            let gradient=head_left-head_right;
+            if gradient.abs()<0.01 {
+                self.soil.groundwater_flux_remainder.remove(&edge);
+                continue;
+            }
+            let old=self.soil.groundwater_flux_remainder.get(&edge).copied().unwrap_or(0.0);
+            let desired=old+gradient*3.0*dt_climate_seconds/3600.0;
+            let (source,dest,sign)=if desired>0.0 {
+                (from_edge,target,1.0)
+            } else {(target,from_edge,-1.0)};
+            let supply=self.groundwater_liters(source.0,source.1)
+                .saturating_sub(*taken.get(&source).unwrap_or(&0));
+            let room=1000u16.saturating_sub(self.groundwater_liters(dest.0,dest.1))
+                .saturating_sub(*received.get(&dest).unwrap_or(&0));
+            let requested=desired.abs().floor().min(u16::MAX as f64) as u16;
+            let moved=requested.min(supply).min(room);
+            if moved>0 {
+                *taken.entry(source).or_default()+=moved;
+                *received.entry(dest).or_default()+=moved;
+                changed+=1;
+            }
+            // If a boundary is blocked or a donor runs dry, discard rather
+            // than accumulate an impossible debt for future ticks.
+            let remainder=if requested>moved || supply==0 || room==0 {
+                0.0
+            } else {desired-sign*moved as f64};
+            if remainder.abs()>1e-12 {
+                self.soil.groundwater_flux_remainder.insert(edge,remainder);
+            } else {self.soil.groundwater_flux_remainder.remove(&edge);}
+        }
+        let mut updates:HashMap<Column,i32>=HashMap::new();
+        for (key,l) in taken {*updates.entry(key).or_default()-=l as i32;}
+        for (key,l) in received {*updates.entry(key).or_default()+=l as i32;}
+        let mut updates:Vec<_>=updates.into_iter().collect();
+        updates.sort_unstable_by_key(|&(key,_)|key);
+        for (key,diff) in updates {
+            if diff==0 {continue;}
+            let mat=SoilMaterial::from_terrain(self,key.0,key.1);
+            let mut col=self.soil.columns.get(&key).copied().unwrap_or(SoilColumn {
+                moisture_l:mat.initial_l,groundwater_l:0,
+                infiltration_remainder:0.0,percolation_remainder:0.0,
+                spring_remainder:0.0,
+            });
+            let updated=col.groundwater_l as i32+diff;
+            assert!((0..=1000).contains(&updated),"groundwater flux overdraw");
+            col.groundwater_l=updated as u16;
+            self.update_soil_column(key,col);
+            self.soil.activate(key);
+        }
+        changed
+    }
+
 }
 
 #[cfg(test)]
@@ -227,6 +319,47 @@ mod tests {
         let before=t.water_mass_error_liters();
         t.step_soil(3600.0,128);
         assert_eq!(t.water_liters(x,y,bed),100);
+        assert_eq!(t.water_mass_error_liters(),before);
+    }
+
+    #[test]
+    fn groundwater_moves_down_hydraulic_head_without_mass_loss() {
+        let mut t=Terrain::new();
+        let (x,y)=(WORLD_SIZE/2,WORLD_SIZE/2);
+        let mat=SoilMaterial::from_terrain(&t,x,y);
+        t.update_soil_column((x,y),SoilColumn {
+            moisture_l:mat.initial_l,groundwater_l:800,
+            infiltration_remainder:0.0,percolation_remainder:0.0,
+            spring_remainder:0.0,
+        });
+        t.soil.activate((x,y));
+        let before=t.water_mass_error_liters();
+        assert!(t.step_groundwater(3600.0,128)>0);
+        assert!(t.groundwater_liters(x,y)<800);
+        let neighbor_sum=t.groundwater_liters(x+1,y) as u32
+            +t.groundwater_liters(x-1,y) as u32
+            +t.groundwater_liters(x,y+1) as u32
+            +t.groundwater_liters(x,y-1) as u32;
+        assert!(neighbor_sum>0);
+        assert_eq!(t.water_mass_error_liters(),before);
+    }
+    #[test]
+    fn groundwater_does_not_pass_into_impermeable_stone() {
+        let mut t=Terrain::new();
+        let (x,y)=(WORLD_SIZE/2,WORLD_SIZE/2);
+        let neighbor=(x+1,y);
+        let h=t.height(neighbor.0,neighbor.1);
+        t.set(neighbor.0,neighbor.1,h,Block::Stone);
+        let mat=SoilMaterial::from_terrain(&t,x,y);
+        t.update_soil_column((x,y),SoilColumn {
+            moisture_l:mat.initial_l,groundwater_l:800,
+            infiltration_remainder:0.0,percolation_remainder:0.0,
+            spring_remainder:0.0,
+        });
+        t.soil.activate((x,y));
+        let before=t.water_mass_error_liters();
+        t.step_groundwater(3600.0,128);
+        assert_eq!(t.groundwater_liters(neighbor.0,neighbor.1),0);
         assert_eq!(t.water_mass_error_liters(),before);
     }
     #[test]
