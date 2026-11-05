@@ -61,7 +61,6 @@ fn block(t: &Terrain, x:i32, y:i32, z:i32, height:i32) -> Block {
     let cell=(wrap(x),wrap(y),z);
     if let Some(&b)=t.edits.get(&cell) {
         if b.solid() {return b;}
-        if b==Block::Water {return Block::Water;}
     }
     if let Some(&volume)=t.water.amounts.get(&cell) {
         return if volume>0 {Block::Water} else {Block::Air};
