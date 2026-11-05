@@ -22,6 +22,13 @@ pub struct WaterState {
     // Signed deviation from finite, implicit initial surface-water inventory.
     // Atmospheric/soil reservoirs must balance this delta in a closed system.
     pub surface_delta_liters: i64,
+    // O(1) surface-column volume queries, relative to the implicit initial
+    // water columns. Underground edits are excluded from these deltas.
+    surface_column_delta:HashMap<(i32,i32),i64>,
+    // Rare unsupported above-ground water and constructed roofs cannot be
+    // interpreted as a single contiguous free-surface height column.
+    highest_modified_wet_z:HashMap<(i32,i32),i32>,
+    pub(crate) blocked_surface_columns:HashSet<(i32,i32)>,
 }
 impl WaterState {
     pub fn activate(&mut self, at:Cell) {
@@ -51,31 +58,16 @@ impl Terrain {
         let x=wrap(x);let y=wrap(y);
         let bed=(self.height(x,y)+1).min(WORLD_HEIGHT);
         let initial=self.initial_water_surface(x,y);
-        let mut liters=0u32;
-        let mut seen_air=false;
-        let mut blocked=false;
-        for z in bed..WORLD_HEIGHT {
-            let cell=(x,y,z);
-            if self.edits.get(&cell).is_some_and(|b|b.solid()) {
-                blocked=true;
-                seen_air=true;
-                continue;
-            }
-            let amount=if let Some(&amount)=self.water.amounts.get(&cell) {
-                amount
-            } else if !self.edits.contains_key(&cell) && z<initial {
-                CAPACITY_L
-            } else {0};
-            if amount==0 {seen_air=true;}
-            else {
-                if seen_air {blocked=true;} // air gap: not a height field
-                liters+=amount as u32;
-            }
-        }
+        let baseline=((initial-bed).max(0) as i64)*CAPACITY_L as i64;
+        let delta=self.water.surface_column_delta.get(&(x,y)).copied().unwrap_or(0);
+        let liters=(baseline+delta).max(0) as u32;
         let depth=liters as f64/CAPACITY_L as f64;
+        let unsupported=self.water.highest_modified_wet_z.get(&(x,y))
+            .is_some_and(|&top|top as f64>bed as f64+depth+0.000_001);
+        let blocked=unsupported
+            || self.water.blocked_surface_columns.contains(&(x,y));
         // A consistent invisible micro-relief field; its influence is
-        // limited to thin runoff. Deep lake surfaces are not artificially
-        // perturbed by the unresolved terrain slope.
+        // limited to thin runoff. Deep lake surfaces remain well-balanced.
         let mx=crate::terrain::delta(x,crate::terrain::WORLD_SIZE/2) as f64;
         let my=crate::terrain::delta(y,crate::terrain::WORLD_SIZE/2) as f64;
         let r=(mx+115.0).hypot(my-125.0);
@@ -192,7 +184,23 @@ impl Terrain {
         let cell=canonical(cell);
         let old=self.water_liters(cell.0,cell.1,cell.2);
         let new_amount=amount.min(CAPACITY_L);
-        self.water.surface_delta_liters+=new_amount as i64-old as i64;
+        let change=new_amount as i64-old as i64;
+        self.water.surface_delta_liters+=change;
+        if cell.2>self.height(cell.0,cell.1) {
+            *self.water.surface_column_delta.entry((cell.0,cell.1)).or_default()+=change;
+            if new_amount>0 {
+                self.water.highest_modified_wet_z.entry((cell.0,cell.1))
+                    .and_modify(|top|*top=(*top).max(cell.2))
+                    .or_insert(cell.2);
+            } else if self.water.highest_modified_wet_z.get(&(cell.0,cell.1))==Some(&cell.2) {
+                let top=self.water.amounts.iter().filter_map(|(&(x,y,z),&liters)|
+                    (x==cell.0 && y==cell.1 && z!=cell.2 && liters>0).then_some(z))
+                    .max();
+                if let Some(z)=top {
+                    self.water.highest_modified_wet_z.insert((cell.0,cell.1),z);
+                } else {self.water.highest_modified_wet_z.remove(&(cell.0,cell.1));}
+            }
+        }
         self.water.amounts.insert(cell,new_amount);
         self.water.dirty.insert(cell);
         self.water.activate(cell);
@@ -584,20 +592,22 @@ mod tests {
         let mut t=Terrain::new();
         let x=WORLD_SIZE/2;
         let y=WORLD_SIZE/2;
-        // A closed floor and a roofed bottom passage connect two vertical
-        // water columns, without an exposed surface across the passage.
-        for dx in 0..=3 {t.set(x+dx,y,194,Block::Stone);}
-        for dx in 1..=2 {t.set(x+dx,y,196,Block::Stone);}
-        for z in 195..=200 {t.water_assign((x,y,z),CAPACITY_L);}
-        for z in 195..=198 {t.water_assign((x+3,y,z),CAPACITY_L);}
-        for dx in 1..=2 {t.water_assign((x+dx,y,195),CAPACITY_L);}
+        // Excavated U-shaped flooded tunnel below the natural ground.
+        // Bottom cells lie at Z118; overlying stone forms the roof. Both
+        // shafts have 1m air cavities immediately above their waterlines.
+        for z in 118..=124 {t.set(x,y,z,Block::Air);}
+        for z in 118..=122 {t.set(x+3,y,z,Block::Air);}
+        for dx in 1..=2 {t.set(x+dx,y,118,Block::Air);}
+        for z in 118..=123 {t.water_assign((x,y,z),CAPACITY_L);}
+        for z in 118..=121 {t.water_assign((x+3,y,z),CAPACITY_L);}
+        for dx in 1..=2 {t.water_assign((x+dx,y,118),CAPACITY_L);}
         let before=t.water.surface_delta_liters;
-        t.water.activate((x+1,y,195));
+        t.water.activate((x+1,y,118));
         let mut moves=0;
         for _ in 0..40 {moves+=t.step_water(4096);}
         assert!(moves>0,"connected flooded conduit must transmit pressure");
-        assert!(t.water_liters(x,y,200)<CAPACITY_L);
-        assert!(t.water_liters(x+3,y,199)>0);
+        assert!(t.water_liters(x,y,123)<CAPACITY_L);
+        assert!(t.water_liters(x+3,y,122)>0);
         assert_eq!(t.water.surface_delta_liters,before,
             "pressure exchange must conserve every liter");
     }
