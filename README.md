@@ -36,7 +36,7 @@ Debug builds also work with `cargo run`, but initial terrain meshing is signific
   underneath. Longitude uses the centered X axis mapped to [-180°,180°).
   Latitude uses the existing toroidal climate bands; it is periodic and
   **not geographic latitude on a spherical planet**.
-- Readouts refresh four times a second to reduce texture uploads; frame time
+- Readouts refresh approximately ten times a second to reduce texture uploads; frame time
   is the average game-frame duration, not GPU-only render duration.
 
 The first click captures the mouse; subsequent clicks edit blocks. Maximum reach is 6 meters. Placement into a water-filled voxel is currently disabled rather than silently deleting finite water.
