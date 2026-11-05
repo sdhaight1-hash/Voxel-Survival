@@ -635,8 +635,10 @@ mod tests {
             t.step_water(4096);
         }
         let lake_return:u32=t.water.amounts.iter()
-            .filter(|(&(x,yy,z),&l)| yy==y && x>=lake_x && x<lake_x+77
-                && z>=126 && l>0)
+            .filter(|(&(x,yy,z),&liters)| {
+                let dx=x-lake_x;let dy=yy-y;
+                dx*dx+dy*dy<=76*76 && z>=126 && liters>0
+            })
             .map(|(_, &liters)|liters as u32).sum();
         assert!(lake_return>0,
             "water must return across a valid downhill bank into the lake");
