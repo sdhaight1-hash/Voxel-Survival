@@ -118,8 +118,8 @@ mod tests {
                 -360.0*100.0/WORLD_SIZE as f64).abs()<0.00001);
         assert!((latitude_degrees(0.0)-latitude_degrees(WORLD_SIZE as f64)).abs()<1e-10);
         assert!(latitude_degrees(WORLD_SIZE as f64/4.0) < -89.99);
-        assert!(latitude_degrees(WORLD_SIZE as f64*0.5+10_000.0)>0.0);
-        assert!(latitude_degrees(WORLD_SIZE as f64*0.5-10_000.0)<0.0);
+        assert!(latitude_degrees(WORLD_SIZE as f64*0.5+100.0)>0.0);
+        assert!(latitude_degrees(WORLD_SIZE as f64*0.5-100.0)<0.0);
         assert!(latitude_degrees(WORLD_SIZE as f64*0.5).abs()<0.000001);
     }
     #[test]
