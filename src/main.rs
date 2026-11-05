@@ -299,9 +299,10 @@ impl Game {
             label:Some("placeholder"),size:4,usage:wgpu::BufferUsages::VERTEX|wgpu::BufferUsages::INDEX,
             mapped_at_creation:false,
         });
+        let depth = depth_view(&device,size);
         let mut game = Self {
             surface,device,queue,config,pipeline,
-            depth:depth_view(&device,size),
+            depth,
             camera_buffer,camera_bind,texture_bind,
             vertex_buffer:placeholder.clone(),index_buffer:placeholder,index_count:0,
             mesh_origin:(0,0),terrain,player,selected:Block::Dirt,
