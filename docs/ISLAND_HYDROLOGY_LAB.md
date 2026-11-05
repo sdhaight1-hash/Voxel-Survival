@@ -25,6 +25,20 @@ Start at dry central spawn on the gently rolling inland plateau. The terrain is 
 
 The world is intentionally small enough to walk between areas without teleport commands. The 7x7 chunk-column render window remains unchanged, so distant terrain only appears when approached.
 
+## Time-lapse laboratory control
+
+Press **F1** to cycle **1x → 10x → 100x → 1000x → 1x**. The top-right HUD
+displays the multiplier and local solar day/time. At **100x**, a full game
+day lasts 12 real seconds; at **1000x**, 1.2 real seconds.
+
+Only astronomical/climate time and the existing local thermal calculation
+are accelerated. Player movement stays at 120 Hz and the existing water
+flow solver stays on its safe real-time tick. **Automatic evaporation and
+regional atmospheric moisture are not implemented yet**. When those land,
+they should consume this accelerated climate clock with conservative
+water/energy accounting and stable bounded substeps, rather than multiplying
+player physics or water transport steps directly.
+
 ## Hydrology research checklist
 
 This branch supplies **repeatable initial conditions**, not a claim that the existing cellular water solver self-levels correctly.
