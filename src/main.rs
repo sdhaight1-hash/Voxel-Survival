@@ -25,6 +25,14 @@ const JUMP_SPEED: f64 = 7.5;
 const GRAVITY: f64 = 20.0;
 const MOUSE_SENSITIVITY: f32 = 0.002;
 
+// Lab-only calendar acceleration. Surface-flow and player physics keep their
+// existing stable fixed steps; climatic processes use scaled elapsed time.
+const LAB_TIME_SCALES: [u32; 4] = [1, 10, 100, 1000];
+fn next_lab_time_scale(current: u32) -> u32 {
+    let i = LAB_TIME_SCALES.iter().position(|&speed| speed == current).unwrap_or(0);
+    LAB_TIME_SCALES[(i + 1) % LAB_TIME_SCALES.len()]
+}
+
 #[repr(C)]
 #[derive(Copy, Clone, Pod, Zeroable)]
 struct CameraUniform {
@@ -314,6 +322,7 @@ struct Game {
     physics_accumulator: f32,
     water_accumulator: f32,
     world_time_seconds: f64,
+    time_scale: u32,
     surface_temperature: geoscience::ThermalCell,
     sunlight: f32,
 }
@@ -573,7 +582,7 @@ impl Game {
             keys:HashSet::new(),mouse_captured:false,last_frame:Instant::now(),
             hud_frame_seconds:0.0,hud_elapsed:0.0,hud_frames:0,hud_fps:0.0,hud_frame_ms:0.0,
             physics_accumulator:0.0,water_accumulator:0.0,
-            world_time_seconds:0.0,
+            world_time_seconds:0.0,time_scale:1,
             surface_temperature:geoscience::ThermalCell {temperature_c:15.0},
             sunlight:1.0,
         };
@@ -650,7 +659,7 @@ impl Game {
     fn upload_hud(&self) {
         let data=hud::rasterize(self.player.yaw,self.player.pos.x,
             self.player.pos.y,self.player.pos.z,
-            self.hud_fps,self.hud_frame_ms);
+            self.hud_fps,self.hud_frame_ms,self.time_scale,self.world_time_seconds);
         self.queue.write_texture(
             wgpu::ImageCopyTexture {
                 texture:&self.hud_texture,mip_level:0,
@@ -688,21 +697,38 @@ impl Game {
             self.hud_frames=0;
             self.upload_hud();
         }
-        self.world_time_seconds += frame_dt as f64;
-        // Twenty real minutes per simulated day, 120 days per year.
-        // The solar model uses continuous energy in W/m²; thermal integration
-        // receives matching simulated seconds, not render-frame counts.
-        let solar_time = geoscience::SolarTime {
+        // Accelerate astronomical/climate time only. Multiplying the 120 Hz
+        // player step or the existing 0.2 s fluid tick would be unstable
+        // and prohibitively expensive at 1000x.
+        let prior_time=self.world_time_seconds;
+        let advanced=frame_dt as f64*self.time_scale as f64;
+        self.world_time_seconds+=advanced;
+        // One 20-minute calendar day corresponds to 86,400 climatic seconds.
+        // Substep heat integration so 1000x never applies an enormous dt.
+        let thermal_seconds=advanced*72.0;
+        let thermal_steps=(thermal_seconds/120.0).ceil().max(1.0) as usize;
+        for i in 0..thermal_steps {
+            let sample_time=prior_time+advanced*(i as f64+0.5)/thermal_steps as f64;
+            let sample_solar=geoscience::SolarTime {
+                day_fraction:(sample_time/1200.0).fract(),
+                year_fraction:(0.25+sample_time/(1200.0*120.0)).fract(),
+                ..Default::default()
+            };
+            let solar=geoscience::solar_flux_w_m2(
+                self.player.pos.x as i32,self.player.pos.y as i32,sample_solar,
+            );
+            self.surface_temperature.advance(solar,geoscience::Surface::Grass,
+                300.0,0.0,thermal_seconds/thermal_steps as f64);
+        }
+        let solar_time=geoscience::SolarTime {
             day_fraction:(self.world_time_seconds/1200.0).fract(),
             year_fraction:(0.25+self.world_time_seconds/(1200.0*120.0)).fract(),
             ..Default::default()
         };
-        let solar = geoscience::solar_flux_w_m2(
+        let solar=geoscience::solar_flux_w_m2(
             self.player.pos.x as i32,self.player.pos.y as i32,solar_time,
         );
         self.sunlight=(solar/950.0).clamp(0.0,1.0) as f32;
-        self.surface_temperature.advance(solar,geoscience::Surface::Grass,
-            300.0,0.0,frame_dt as f64*72.0);
         self.physics_accumulator += frame_dt;
         let mut ticks = 0;
         while self.physics_accumulator >= PHYSICS_DT && ticks < 12 {
@@ -852,6 +878,10 @@ fn main() {
                         }
                         if event.state == ElementState::Pressed {
                             game.keys.insert(code);
+                            if code == KeyCode::F1 && !event.repeat {
+                                game.time_scale=next_lab_time_scale(game.time_scale);
+                                game.upload_hud();
+                            }
                             game.selected = match code {
                                 KeyCode::Digit1 => Block::Dirt,
                                 KeyCode::Digit2 => Block::Grass,
@@ -926,6 +956,23 @@ mod movement_tests {
                  pitch:0.0, grounded:true }
     }
 
+    #[test]
+    fn f1_cycles_through_lab_time_rates_and_back_to_normal() {
+        assert_eq!(LAB_TIME_SCALES,[1,10,100,1000]);
+        let mut scale=1;
+        for expected in [10,100,1000,1] {
+            scale=next_lab_time_scale(scale);
+            assert_eq!(scale,expected);
+        }
+    }
+
+    #[test]
+    fn accelerated_calendar_is_independent_of_fixed_physics_ticks() {
+        // F1 scales calendar advancement, not the 120 Hz player timestep.
+        let real_dt=0.05_f64;
+        assert_eq!(real_dt*LAB_TIME_SCALES[2] as f64,5.0);
+        assert!((PHYSICS_DT as f64-1.0/120.0).abs()<1e-8);
+    }
     #[test]
     fn strafe_right_moves_screen_right_and_left_moves_screen_left() {
         let t = Terrain::new();
