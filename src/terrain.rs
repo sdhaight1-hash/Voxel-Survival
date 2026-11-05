@@ -1,5 +1,6 @@
 use noise::{NoiseFn, Perlin};
 use std::collections::HashMap;
+use crate::hydrology::WaterState;
 
 pub const WORLD_SIZE: i32 = 1_024_000;
 pub const WORLD_HEIGHT: i32 = 256;
@@ -30,9 +31,10 @@ pub fn delta(n: i32, origin: i32) -> i32 {
 pub struct Terrain {
     noise: Perlin,
     pub(crate) edits: HashMap<(i32, i32, i32), Block>,
+    pub(crate) water: WaterState,
 }
 impl Terrain {
-    pub fn new() -> Self { Self { noise: Perlin::new(42), edits: HashMap::new() } }
+    pub fn new() -> Self { Self { noise: Perlin::new(42), edits: HashMap::new(), water: WaterState::default() } }
 
     // Periodic embedding of X/Y into four dimensions. The map has no seam.
     pub fn height(&self, x: i32, y: i32) -> i32 {
@@ -51,25 +53,28 @@ impl Terrain {
 
     pub fn block(&self, x: i32, y: i32, z: i32) -> Block {
         if !(0..WORLD_HEIGHT).contains(&z) { return Block::Air; }
-        let x = wrap(x);
-        let y = wrap(y);
-        if let Some(&block) = self.edits.get(&(x, y, z)) { return block; }
-        let h = self.height(x, y);
-        if z > h {
-            if z <= SEA_LEVEL { Block::Water } else { Block::Air }
-        } else if z == h {
-            if h < SEA_LEVEL { Block::Dirt } else { Block::Grass }
-        } else if z >= h - 3 {
-            Block::Dirt
-        } else {
-            Block::Stone
+        let x=wrap(x);
+        let y=wrap(y);
+        let cell=(x,y,z);
+        if let Some(&b)=self.edits.get(&cell) {
+            if b.solid() {return b;}
         }
+        if self.water_liters(x,y,z)>0 {return Block::Water;}
+        if self.edits.contains_key(&cell) {return Block::Air;}
+        let h=self.height(x,y);
+        if z>h {Block::Air}
+        else if z==h {if h<SEA_LEVEL {Block::Dirt} else {Block::Grass}}
+        else if z>=h-3 {Block::Dirt}
+        else {Block::Stone}
     }
-    pub fn set(&mut self, x: i32, y: i32, z: i32, block: Block) {
+    pub fn set(&mut self, x:i32, y:i32, z:i32, block:Block) {
         if (0..WORLD_HEIGHT).contains(&z) {
-            self.edits.insert((wrap(x), wrap(y), z), block);
+            let cell=(wrap(x),wrap(y),z);
+            self.edits.insert(cell,block);
+            self.water.activate(cell);
         }
     }
+
 }
 
 #[cfg(test)]
