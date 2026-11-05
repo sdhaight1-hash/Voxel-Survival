@@ -326,6 +326,26 @@ mod tests {
         assert!(a.rain_unmet_liters>0);
     }
     #[test]
+    fn ten_day_af_rainfall_target_is_met_only_when_cloud_mass_exists() {
+        let mut t=Terrain::new();
+        let mut a=Atmosphere::new_af();
+        let (x,y)=(WORLD_SIZE/2+32,WORLD_SIZE/2+32);
+        // Five 48-hour storm periods produce 75 mm on each 1m2 cell.
+        // One millimeter over one square meter is precisely one liter.
+        a.time_seconds=10.0*86_400.0;
+        let before=t.water_mass_error_liters() as f64+a.water_delta_kg();
+        let deposited=a.rain_near(&mut t,x,y,10.0*86_400.0);
+        assert_eq!(deposited,169*75);
+        assert!(deposited>=169*60);
+        assert_eq!(a.rain_unmet_liters,0);
+        assert!((t.water_mass_error_liters() as f64+a.water_delta_kg()-before).abs()<0.001);
+        // The stored cloud cannot fund ten-day targets indefinitely.
+        a.time_seconds=20.0*86_400.0;
+        a.rain_near(&mut t,x,y,10.0*86_400.0);
+        assert!(a.rain_unmet_liters>0,
+            "finite cloud supply must report the unmet Af forcing target");
+    }
+    #[test]
     fn storm_depth_is_invariant_to_climate_substep_size() {
         let mut coarse_t=Terrain::new();let mut fine_t=Terrain::new();
         let mut coarse=Atmosphere::new_af();let mut fine=Atmosphere::new_af();
