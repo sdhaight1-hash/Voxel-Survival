@@ -752,6 +752,53 @@ mod movement_tests {
     }
 
     #[test]
+    fn grounded_player_stays_at_exact_same_height() {
+        let mut t=Terrain::new();
+        let x=WORLD_SIZE/2;
+        let y=WORLD_SIZE/2;
+        for dx in -2..=2 {
+            for dy in -2..=2 { t.set(x+dx,y+dy,200,Block::Stone); }
+        }
+        let mut p=player(x as f32+0.5,y as f32+0.5,201.0);
+        for _ in 0..720 {
+            update_player(&mut p,&t,&HashSet::new(),PHYSICS_DT);
+            assert_eq!(p.pos.z,201.0,"stationary camera bobbed on level floor");
+            assert!(p.grounded);
+        }
+    }
+
+    #[test]
+    fn player_falls_only_after_walking_off_edge() {
+        let mut t=Terrain::new();
+        let x=WORLD_SIZE/2;
+        let y=WORLD_SIZE/2;
+        for dy in -1..=1 { t.set(x,y+dy,200,Block::Stone); }
+        let mut p=player(x as f32+0.5,y as f32+0.5,201.0);
+        for _ in 0..150 {
+            update_player(&mut p,&t,&HashSet::from([KeyCode::KeyW]),PHYSICS_DT);
+        }
+        assert!(p.pos.z<200.0,"the player did not fall off the platform");
+    }
+
+    #[test]
+    fn head_collisions_do_not_teleport_player_upwards() {
+        let mut t=Terrain::new();
+        let x=WORLD_SIZE/2;
+        let y=WORLD_SIZE/2;
+        for dx in -1..=1 {
+            for dy in -1..=1 {
+                t.set(x+dx,y+dy,200,Block::Stone);
+                t.set(x+dx,y+dy,203,Block::Stone);
+            }
+        }
+        let mut p=player(x as f32+0.5,y as f32+0.5,201.0);
+        for _ in 0..120 {
+            update_player(&mut p,&t,&HashSet::from([KeyCode::Space]),PHYSICS_DT);
+            assert!(p.pos.z<=201.71,"head entered the ceiling");
+        }
+    }
+
+    #[test]
     fn walking_into_a_one_meter_wall_does_not_auto_climb() {
         let mut t = Terrain::new();
         let x = WORLD_SIZE / 2;
