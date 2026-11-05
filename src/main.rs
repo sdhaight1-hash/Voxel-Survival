@@ -591,3 +591,66 @@ mod shader_tests {
         ).validate(&module).expect("WGSL shader validation");
     }
 }
+
+#[cfg(test)]
+mod movement_tests {
+    use super::*;
+
+    fn player(x: f32, y: f32, z: f32) -> Player {
+        Player { pos: Vec3::new(x,y,z), velocity_z:0.0, yaw:0.0,
+                 pitch:0.0, grounded:true }
+    }
+
+    #[test]
+    fn strafe_right_moves_screen_right_and_left_moves_screen_left() {
+        let t = Terrain::new();
+        let x = (WORLD_SIZE / 2) as f32 + 0.5;
+        let y = x;
+        let z = 230.0; // Air above terrain, so direction is isolated.
+        let mut p = player(x,y,z);
+        update_player(&mut p,&t,&HashSet::from([KeyCode::KeyD]),1.0/60.0);
+        assert!(p.pos.y < y, "D should move right, toward negative Y at yaw 0");
+        let mut p = player(x,y,z);
+        update_player(&mut p,&t,&HashSet::from([KeyCode::KeyA]),1.0/60.0);
+        assert!(p.pos.y > y, "A should move left, toward positive Y at yaw 0");
+    }
+
+    #[test]
+    fn jump_clears_one_meter_block_without_automatic_stepping() {
+        let mut t = Terrain::new();
+        let x = WORLD_SIZE / 2;
+        let y = WORLD_SIZE / 2;
+        // Small, flat arena well above the default terrain height.
+        for dx in -2..=7 {
+            for dy in -2..=2 {
+                t.set(x+dx,y+dy,200,Block::Stone);
+            }
+        }
+        for dy in -1..=1 { t.set(x+2,y+dy,201,Block::Stone); }
+        let mut p = player(x as f32+0.5,y as f32+0.5,201.0);
+        let mut peak = p.pos.z;
+        let keys = HashSet::from([KeyCode::KeyW,KeyCode::Space]);
+        for _ in 0..120 {
+            update_player(&mut p,&t,&keys,1.0/120.0);
+            peak = peak.max(p.pos.z);
+        }
+        assert!(peak > 202.15, "jump must exceed one-meter obstacle with clearance");
+        assert!(p.pos.x > x as f32 + 3.3, "player should traverse the block");
+    }
+
+    #[test]
+    fn walking_into_a_one_meter_wall_does_not_auto_climb() {
+        let mut t = Terrain::new();
+        let x = WORLD_SIZE / 2;
+        let y = WORLD_SIZE / 2;
+        for dx in -2..=5 {
+            for dy in -2..=2 { t.set(x+dx,y+dy,200,Block::Stone); }
+        }
+        for dy in -1..=1 { t.set(x+2,y+dy,201,Block::Stone); }
+        let mut p = player(x as f32+0.5,y as f32+0.5,201.0);
+        let keys = HashSet::from([KeyCode::KeyW]);
+        for _ in 0..100 { update_player(&mut p,&t,&keys,1.0/120.0); }
+        assert!(p.pos.x < x as f32 + 2.0);
+        assert!(p.pos.z < 201.1, "walking must not teleport up one meter");
+    }
+}
