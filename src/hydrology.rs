@@ -37,7 +37,6 @@ impl Terrain {
         let cell=(wrap(x),wrap(y),z);
         if let Some(b)=self.edits.get(&cell) {
             if b.solid() {return 0;}
-            if *b==Block::Water {return CAPACITY_L;}
         }
         if let Some(&volume)=self.water.amounts.get(&cell) {return volume;}
         // New empty cells created by mining are empty until water moves in.
