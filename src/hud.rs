@@ -20,17 +20,17 @@ pub fn heading_degrees(yaw: f32) -> f64 {
 }
 
 /// Centered map-space positions in meters, independent of spawn location.
-pub fn centered_coordinate(world:f32) -> f64 {
-    (world as f64).rem_euclid(WORLD_SIZE as f64)
+pub fn centered_coordinate(world:f64) -> f64 {
+    world.rem_euclid(WORLD_SIZE as f64)
         - WORLD_SIZE as f64 / 2.0
 }
-pub fn longitude_degrees(x:f32) -> f64 {
+pub fn longitude_degrees(x:f64) -> f64 {
     centered_coordinate(x) * 360.0 / WORLD_SIZE as f64
 }
-pub fn latitude_degrees(y:f32) -> f64 {
+pub fn latitude_degrees(y:f64) -> f64 {
     // Periodic virtual latitude, used by the climate simulator.
     // This is NOT spherical geographic latitude.
-    (-((y as f64 / WORLD_SIZE as f64)*TAU).sin()).asin().to_degrees()
+    (-((y / WORLD_SIZE as f64)*TAU).sin()).asin().to_degrees()
 }
 
 fn pixel(out:&mut [u8],x:i32,y:i32,color:[u8;4]) {
@@ -63,7 +63,7 @@ fn centered_text(out:&mut [u8],center:i32,y:i32,msg:&str,color:[u8;4],scale:i32)
 fn compass(out:&mut [u8],heading:f64) {
     fill(out,0,0,COMPASS_W,HEIGHT as i32,PANEL_BG);
     // Scroll compass ticks under the fixed center indicator.
-    let heading = heading.rem_euclid(360.0);
+    let heading = (heading.round() as i32).rem_euclid(360) as f64;
     for offset in -13..=13 {
         let degrees=(heading / 15.0).floor() as i32 * 15 + offset*15;
         let dx=(degrees as f64-heading)*4.0;
@@ -81,15 +81,15 @@ fn compass(out:&mut [u8],heading:f64) {
         }
     }
     fill(out,COMPASS_W/2-1,19,3,22,ACCENT);
-    centered_text(out,COMPASS_W/2,48,&format!("{:03.0} deg",heading),WHITE,1);
+    centered_text(out,COMPASS_W/2,48,&format!("{:03} deg",heading as i32),WHITE,1);
 }
-pub fn rasterize(yaw:f32,x:f32,y:f32,z:f32,fps:f32,frame_ms:f32) -> Vec<u8> {
+pub fn rasterize(yaw:f32,x:f64,y:f64,z:f64,fps:f32,frame_ms:f32) -> Vec<u8> {
     let mut out=vec![0u8;(WIDTH*HEIGHT*4) as usize];
     compass(&mut out,heading_degrees(yaw));
     fill(&mut out,INFO_X,0,320,HEIGHT as i32,PANEL_BG);
     text(&mut out,INFO_X+12,8,&format!("FPS {:5.1}  {:5.1} ms",fps,frame_ms),ACCENT,1);
-    text(&mut out,INFO_X+12,28,&format!("X {:+8.1}  Y {:+8.1}",centered_coordinate(x),centered_coordinate(y)),WHITE,1);
-    text(&mut out,INFO_X+12,47,&format!("Z {:+7.1} m",z),WHITE,1);
+    text(&mut out,INFO_X+12,28,&format!("X {:+8.0}  Y {:+8.0}",centered_coordinate(x),centered_coordinate(y)),WHITE,1);
+    text(&mut out,INFO_X+12,47,&format!("Z {:+7.0} m",z),WHITE,1);
     centered_text(&mut out,COMPASS_W/2,68,
         &format!("V-LAT {:+6.2}  LON {:+7.2}",latitude_degrees(y),longitude_degrees(x)),
         MUTED,1);
@@ -108,7 +108,7 @@ mod tests {
     }
     #[test]
     fn coordinates_use_map_center_and_are_periodic() {
-        let half=WORLD_SIZE as f32/2.0;
+        let half=WORLD_SIZE as f64/2.0;
         assert_eq!(centered_coordinate(half),0.0);
         assert_eq!(centered_coordinate(0.0),-half as f64);
         assert_eq!(centered_coordinate(half+125.0),125.0);
@@ -116,9 +116,9 @@ mod tests {
         assert!((longitude_degrees(0.0)+180.0).abs()<0.00001);
         assert!((longitude_degrees(half+100.0)-longitude_degrees(half)
                 -360.0*100.0/WORLD_SIZE as f64).abs()<0.00001);
-        assert!((latitude_degrees(0.0)-latitude_degrees(WORLD_SIZE as f32)).abs()<1e-10);
-        assert!(latitude_degrees(WORLD_SIZE as f32/4.0) < -89.99);
-        assert!(latitude_degrees(WORLD_SIZE as f32*0.5+10_000.0)>0.0);
+        assert!((latitude_degrees(0.0)-latitude_degrees(WORLD_SIZE as f64)).abs()<1e-10);
+        assert!(latitude_degrees(WORLD_SIZE as f64/4.0) < -89.99);
+        assert!(latitude_degrees(WORLD_SIZE as f64*0.5+10_000.0)>0.0);
         assert!(latitude_degrees(WORLD_SIZE as f32*0.5-10_000.0)<0.0);
         assert!(latitude_degrees(WORLD_SIZE as f32*0.5).abs()<0.000001);
     }
