@@ -611,12 +611,13 @@ impl Game {
     }
     fn update(&mut self) {
         let now = Instant::now();
-        let frame_dt = now.duration_since(self.last_frame).as_secs_f32().min(0.1);
+        let measured_dt = now.duration_since(self.last_frame).as_secs_f32();
+        let frame_dt = measured_dt.min(0.1);
         self.last_frame = now;
-        self.hud_elapsed += frame_dt;
-        self.hud_frame_seconds += frame_dt;
+        self.hud_elapsed += measured_dt;
+        self.hud_frame_seconds += measured_dt;
         self.hud_frames += 1;
-        if self.hud_elapsed >= 0.25 {
+        if self.hud_elapsed >= 0.10 {
             let average=self.hud_frame_seconds/self.hud_frames as f32;
             self.hud_fps=1.0/average.max(0.00001);
             self.hud_frame_ms=average*1000.0;
