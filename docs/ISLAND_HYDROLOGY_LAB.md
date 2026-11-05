@@ -1,6 +1,6 @@
 # Island Hydrology Lab (experimental branch)
 
-This branch intentionally changes `WORLD_SIZE` from 1,024,000 meters to **1,024 meters**, retaining toroidal X/Y wrapping, 1m voxels, 32m chunks, vertical height 256m, sea at Z=110, and the existing WGPU/Vulkan gameplay controls.
+This experimental test family intentionally changes `WORLD_SIZE` from 1,024,000 meters to **1,024 meters**, retaining toroidal X/Y wrapping, 1m voxels, 32m chunks, vertical height 256m, sea at Z=110, and the existing WGPU/Vulkan gameplay controls.
 
 **This is a contained terrain/hydrology testbed, not a replacement for the production world. Do not merge into main.**
 
@@ -31,13 +31,26 @@ Press **F1** to cycle **1x → 10x → 100x → 1000x → 1x**. The top-right HU
 displays the multiplier and local solar day/time. At **100x**, a full game
 day lasts 12 real seconds; at **1000x**, 1.2 real seconds.
 
-Only astronomical/climate time and the existing local thermal calculation
-are accelerated. Player movement stays at 120 Hz and the existing water
-flow solver stays on its safe real-time tick. **Automatic evaporation and
-regional atmospheric moisture are not implemented yet**. When those land,
-they should consume this accelerated climate clock with conservative
-water/energy accounting and stable bounded substeps, rather than multiplying
-player physics or water transport steps directly.
+The player's 120 Hz movement and surface flow's real-time cadence stay
+independent of F1. The experimental work branch now accelerates a **finite
+water/soil/groundwater/atmosphere exchange clock** and a regional cloud/rain
+model. The top-right HUD shows RH, conservation error, delivered rain and
+unmet scheduled rainfall. This is a prototype, not validated climate physics.
+
+A 16x16 regional atmosphere (64m horizontal cells, one illustrative 2km
+layer) holds vapor/cloud mass separately from terrain voxels. A deterministic
+12-hour storm every 48 hours requests 30mm/day *while raining* — an average
+75mm per 10-day climate month **only if cloud water exists**. Precipitation
+transfers exactly 1L for 1mm on each 1m2 column, debiting the local cloud.
+Insufficient cloud water is counted as unmet rain demand, never automatically
+replenished. Water evaporation and precipitation currently affect only a
+13x13-cell patch around the player. **They do not yet simulate whole-island
+Af rainfall or guarantee every month >=60mm.** Regional wind is a prescribed
+conservative passive-tracer approximation, not a circulation solver.
+
+Climate transfer rates require more numerical F1 equivalence tests,
+catchment-wide deposition/evaporation and heat-budget coupling before this
+can be treated as a complete 120-day Af rainforest cycle.
 
 ## Hydrology research checklist
 
@@ -48,7 +61,7 @@ This branch supplies **repeatable initial conditions**, not a claim that the exi
 3. **Swamp:** test water around dry hummocks and restricted channels.
 4. **Ocean:** dig/replace blocks across chunk and torus boundaries; ensure zero lost or created liters.
 5. **Separated reservoirs:** build and breach a dam to test connectivity changes and local water redistribution.
-6. **U-shaped passage:** verify eventual equalization including upward pressure flow (currently *not supported*).
+6. **U-shaped passage:** test bounded pressure-driven transfer in a flooded tunnel (prototype implemented; not general subsurface CFD).
 7. **Rendering:** monitor partial-volume side faces, transparency, and visually missing water under solid roofs.
 8. **Performance:** record FPS/frame ms near the ocean and during mass movement; aim to update only active regions.
 
@@ -57,7 +70,14 @@ This branch supplies **repeatable initial conditions**, not a claim that the exi
 - Initial lake, river, swamp and ocean water is represented by **terrain column height plus a column-specific initial surface height**. Only above-bed cells are initially wet; finite sparse overrides record disturbances.
 - The initial water height is never used as an automatic refill after a cell has been modified.
 - Water still transfers in integer liters (1m³ = 1,000L).
-- Water bodies do **not** yet have a shared reservoir ID, global equilibrium height, conservative pressure solver or catchment-wide volume–elevation curve.
+- Surface water now has a conservation-based column/head solver and limited
+  pressure-connected cave transfer, but still uses sparse voxel-volume
+  storage as its adapter. A general reservoir graph and catchment-wide
+  volume–elevation curve are **not** yet implemented.
+- Topsoil has finite moisture/pore capacity and groundwater; capped spring
+  seepage and head-driven lateral groundwater fluxes return stored water.
+- The water render mesh includes elevated initial lake surfaces rather than
+  stopping at the underlying terrain elevation.
 - River elevation varies intentionally along its slope. Lake surface is initially flat.
 - This 1km lab torus is not geographically realistic. The existing virtual latitude/wind/tectonic scaling should **not** be used to validate planetary climate on this tiny map.
 - Edited terrain/water remains session-only; world saves are not yet implemented.
@@ -68,7 +88,7 @@ From the repository root:
 
 ```powershell
 git fetch origin
-git switch experiment/island-hydrology-lab
+git switch work/island-hydrology-phase0-1
 cargo run --release
 ```
 
