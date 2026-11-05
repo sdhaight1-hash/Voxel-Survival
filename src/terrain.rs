@@ -136,7 +136,17 @@ impl Terrain {
         if block == Block::Water {return;}
         if (0..WORLD_HEIGHT).contains(&z) {
             let cell=(wrap(x),wrap(y),z);
+            let bed=self.height(cell.0,cell.1)+1;
             self.edits.insert(cell,block);
+            if z>=bed {
+                let has_roof=self.edits.iter().any(|(&(ex,ey,ez),&b)|
+                    ex==cell.0 && ey==cell.1 && ez>=bed && b.solid());
+                if has_roof {
+                    self.water.blocked_surface_columns.insert((cell.0,cell.1));
+                } else {
+                    self.water.blocked_surface_columns.remove(&(cell.0,cell.1));
+                }
+            }
             self.water.activate(cell);
             self.soil.activate((cell.0,cell.1));
         }
