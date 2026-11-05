@@ -182,8 +182,8 @@ mod tests {
     }
     #[test]
     fn latitude_north_of_map_center_is_positive() {
-        assert!(virtual_latitude_rad(WORLD_SIZE/2+10_000)>0.0);
-        assert!(virtual_latitude_rad(WORLD_SIZE/2-10_000)<0.0);
+        assert!(virtual_latitude_rad(WORLD_SIZE/2+100)>0.0);
+        assert!(virtual_latitude_rad(WORLD_SIZE/2-100)<0.0);
         assert!(virtual_latitude_rad(WORLD_SIZE/2).abs()<1e-10);
     }
     #[test]
