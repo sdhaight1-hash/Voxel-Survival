@@ -334,7 +334,16 @@ impl Game {
                     write_mask:wgpu::ColorWrites::ALL,
                 })],compilation_options:Default::default(),
             }),
-            primitive:Default::default(),depth_stencil:None,
+            primitive:Default::default(),
+            // This pipeline shares the terrain render pass, which has a depth attachment.
+            // Match its format without reading or modifying terrain depth.
+            depth_stencil:Some(wgpu::DepthStencilState {
+                format:wgpu::TextureFormat::Depth24Plus,
+                depth_write_enabled:false,
+                depth_compare:wgpu::CompareFunction::Always,
+                stencil:Default::default(),
+                bias:Default::default(),
+            }),
             multisample:Default::default(),multiview:None,
         });
         let terrain = Terrain::new();
