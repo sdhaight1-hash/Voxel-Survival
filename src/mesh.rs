@@ -83,6 +83,13 @@ pub fn build(t: &Terrain, center_x: i32, center_y: i32, radius: i32) -> Mesh {
                     max_height = max_height.max(h);
                 }
             }
+            // Include player-placed blocks above the original terrain surface.
+            for (&(ex, ey, ez), _) in &t.edits {
+                if (0..CHUNK_SIZE).contains(&delta(ex, base_x))
+                    && (0..CHUNK_SIZE).contains(&delta(ey, base_y)) {
+                    max_height = max_height.max(ez);
+                }
+            }
             for ly in 0..32 {
                 for lx in 0..32 {
                     let x = base_x + lx;
