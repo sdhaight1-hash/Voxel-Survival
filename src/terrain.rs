@@ -29,7 +29,7 @@ pub fn delta(n: i32, origin: i32) -> i32 {
 
 pub struct Terrain {
     noise: Perlin,
-    edits: HashMap<(i32, i32, i32), Block>,
+    pub(crate) edits: HashMap<(i32, i32, i32), Block>,
 }
 impl Terrain {
     pub fn new() -> Self { Self { noise: Perlin::new(42), edits: HashMap::new() } }
