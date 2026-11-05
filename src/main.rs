@@ -195,6 +195,21 @@ fn find_safe_spawn(t: &Terrain) -> Player {
     panic!("No collision-free dry spawn found within 256m of map center");
 }
 
+// A block can be placed in water, but never into the player's own AABB.
+// Use toroidal deltas so this remains correct across both map seams.
+fn player_overlaps_cell(p:&Player, cell:(i32,i32,i32)) -> bool {
+    let fx=p.pos.x.fract();
+    let fy=p.pos.y.fract();
+    let dx=terrain::delta(cell.0,p.pos.x.floor() as i32) as f64;
+    let dy=terrain::delta(cell.1,p.pos.y.floor() as i32) as f64;
+    dx < fx + PLAYER_RADIUS-COLLISION_EPS
+        && dx+1.0 > fx-PLAYER_RADIUS+COLLISION_EPS
+        && dy < fy+PLAYER_RADIUS-COLLISION_EPS
+        && dy+1.0 > fy-PLAYER_RADIUS+COLLISION_EPS
+        && cell.2 as f64 < p.pos.z+PLAYER_HEIGHT-COLLISION_EPS
+        && (cell.2+1) as f64 > p.pos.z+COLLISION_EPS
+}
+
 // Return targeted solid block and the preceding empty cell.
 fn target_block(t: &Terrain, p: &Player) -> Option<((i32,i32,i32), (i32,i32,i32))> {
     let start = p.eye();
@@ -704,24 +719,27 @@ impl Game {
         self.queue.write_buffer(&self.camera_buffer,0,bytemuck::bytes_of(&uniform));
     }
     fn edit(&mut self, button:MouseButton) {
-        if let Some((hit,empty)) = target_block(&self.terrain,&self.player) {
+        if let Some((hit,empty))=target_block(&self.terrain,&self.player) {
+            let mut changed=HashSet::new();
             match button {
-                MouseButton::Left => self.terrain.set(hit.0,hit.1,hit.2,Block::Air),
-                MouseButton::Right => {
-                    let old = self.terrain.block(empty.0,empty.1,empty.2);
-                    // Until displacement is implemented, never delete finite
-                    // water volume when placing a block.
-                    if old == Block::Air {
-                        self.terrain.set(empty.0,empty.1,empty.2,self.selected);
-                        if collides(&self.terrain,self.player.pos) {
-                            self.terrain.set(empty.0,empty.1,empty.2,old);
-                        }
+                // Ray selection already treats water as transparent. Solid
+                // blocks can be mined while submerged or beneath liquid.
+                MouseButton::Left=>{
+                    self.terrain.set(hit.0,hit.1,hit.2,Block::Air);
+                    changed.insert(hit);
+                }
+                MouseButton::Right=>{
+                    if !player_overlaps_cell(&self.player,empty)
+                        && self.terrain.try_place_solid(empty,self.selected) {
+                        changed.insert(empty);
                     }
                 }
-                _ => return,
+                _=>return,
             }
-            let changed=HashSet::from([hit,empty]);
-            self.refresh_edited_chunks(&changed);
+            // Displacing a submerged voxel can alter multiple neighboring
+            // water cells; all affected chunk meshes must be refreshed now.
+            changed.extend(self.terrain.take_water_dirty());
+            if !changed.is_empty() {self.refresh_edited_chunks(&changed);}
         }
     }
     fn render(&mut self) -> Result<(),wgpu::SurfaceError> {
@@ -921,6 +939,27 @@ mod movement_tests {
         }
         assert!(peak > 202.15, "jump must exceed one-meter obstacle with clearance");
         assert!(p.pos.x > x as f64 + 3.3, "player should traverse the block");
+    }
+
+    #[test]
+    fn ray_targets_solid_through_water_for_underwater_mining_and_placement() {
+        let mut t=Terrain::new();
+        let x=WORLD_SIZE/2;
+        let y=WORLD_SIZE/2;
+        t.set(x+2,y,241,Block::Stone);
+        t.water.atmosphere_liters=600;
+        assert_eq!(t.precipitate((x+1,y,241),600),600);
+        let mut p=player(x as f32+0.5,y as f32+0.5,240.0);
+        p.yaw=0.0;
+        let (hit,previous)=target_block(&t,&p).expect("submerged wall target");
+        assert_eq!(hit,(x+2,y,241));
+        assert_eq!(previous,(x+1,y,241));
+        assert!(!player_overlaps_cell(&p,previous));
+        assert!(t.try_place_solid(previous,Block::Dirt));
+        assert_eq!(t.block(x+1,y,241),Block::Dirt);
+        assert_eq!(t.water.amounts.values().map(|&v|v as u32).sum::<u32>(),600);
+        t.set(x+2,y,241,Block::Air);
+        assert_eq!(t.block(x+2,y,241),Block::Air);
     }
 
     #[test]
