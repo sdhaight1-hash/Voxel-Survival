@@ -775,6 +775,12 @@ impl Game {
                 self.player.pos.y.floor() as i32,
                 elapsed,
             );
+            self.atmosphere.rain_near(
+                &mut self.terrain,
+                self.player.pos.x.floor() as i32,
+                self.player.pos.y.floor() as i32,
+                elapsed,
+            );
         }
         let dirty=self.terrain.take_water_dirty();
         if !dirty.is_empty() {self.refresh_edited_chunks(&dirty);}
