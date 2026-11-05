@@ -16,6 +16,7 @@ fn neighbors((x,y,z): Cell) -> [Cell;6] {
 pub struct WaterState {
     pub(crate) amounts: HashMap<Cell,u16>,
     pub(crate) active: HashSet<Cell>,
+    pub(crate) dirty: HashSet<Cell>,
     // Atmosphere is an explicitly finite reservoir, not a source of free rain.
     pub atmosphere_liters: u64,
 }
@@ -48,7 +49,11 @@ impl Terrain {
     fn water_assign(&mut self, cell:Cell, amount:u16) {
         let cell=canonical(cell);
         self.water.amounts.insert(cell,amount.min(CAPACITY_L));
+        self.water.dirty.insert(cell);
         self.water.activate(cell);
+    }
+    pub fn take_water_dirty(&mut self) -> HashSet<Cell> {
+        std::mem::take(&mut self.water.dirty)
     }
     /// Move existing mass, never synthesize water when a cavity is excavated.
     fn transfer(&mut self, from:Cell, to:Cell, limit:u16) -> u16 {
