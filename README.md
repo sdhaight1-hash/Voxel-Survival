@@ -25,6 +25,20 @@ Debug builds also work with `cargo run`, but initial terrain meshing is signific
 | 1 / 2 / 3 | Select dirt / grass / stone |
 | Escape | Release mouse |
 
+## On-screen HUD
+
+- **Top-right:** averaged frames per second (FPS), mean milliseconds per frame,
+  and XYZ positions in **meters relative to the map center**, not the spawn
+  point. The center of the 1,024 km torus reads X=0 and Y=0; Z remains height
+  above the voxel world's vertical origin.
+- **Top-center:** scrolling direction compass (N/NE/E/SE/S/SW/W/NW) with
+  heading in degrees, and a *virtual* latitude/longitude readout directly
+  underneath. Longitude uses the centered X axis mapped to [-180°,180°).
+  Latitude uses the existing toroidal climate bands; it is periodic and
+  **not geographic latitude on a spherical planet**.
+- Readouts refresh four times a second to reduce texture uploads; frame time
+  is the average game-frame duration, not GPU-only render duration.
+
 The first click captures the mouse; subsequent clicks edit blocks. Maximum reach is 6 meters. Placement into a water-filled voxel is currently disabled rather than silently deleting finite water.
 
 ## World rules
