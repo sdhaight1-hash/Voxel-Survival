@@ -68,6 +68,8 @@ impl Terrain {
         else {Block::Stone}
     }
     pub fn set(&mut self, x:i32, y:i32, z:i32, block:Block) {
+        // Liquid is moved only through the finite-volume hydrology API.
+        if block == Block::Water {return;}
         if (0..WORLD_HEIGHT).contains(&z) {
             let cell=(wrap(x),wrap(y),z);
             self.edits.insert(cell,block);
