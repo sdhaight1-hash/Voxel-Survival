@@ -259,6 +259,67 @@ impl Terrain {
         true
     }
 
+    /// Approximate pressure exchange through a small connected, flooded
+    /// subterranean passage. Water connectivity transports the pressure
+    /// signal; mass is moved between exposed free surfaces at a bounded rate.
+    /// This is a sparse conduit adapter, not a full 3D Navier-Stokes solver.
+    fn step_conduit_pressure(&mut self,active_cells:&[Cell])->usize {
+        const MAX_COMPONENT:usize=4096;
+        const MAX_COMPONENTS:usize=8;
+        let mut global_seen=HashSet::new();
+        let mut transfers=0;
+        let mut components=0;
+        for &start in active_cells {
+            if components>=MAX_COMPONENTS {break;}
+            let start=canonical(start);
+            if start.2>self.height(start.0,start.1)
+                || self.water_liters(start.0,start.1,start.2)==0
+                || global_seen.contains(&start) {continue;}
+            components+=1;
+            let mut queue=VecDeque::from([start]);
+            let mut seen=HashSet::from([start]);
+            let mut free_surfaces:Vec<(Cell,f64,u16)>=Vec::new();
+            while let Some(cell)=queue.pop_front() {
+                if seen.len()>MAX_COMPONENT {break;}
+                let liters=self.water_liters(cell.0,cell.1,cell.2);
+                if liters==0 {continue;}
+                let above=(cell.0,cell.1,cell.2+1);
+                if cell.2+1<WORLD_HEIGHT
+                    && self.block(above.0,above.1,above.2)==Block::Air {
+                    free_surfaces.push((cell,cell.2 as f64+liters as f64/1000.0,liters));
+                }
+                for next in neighbors(cell) {
+                    if !(0..WORLD_HEIGHT).contains(&next.2) {continue;}
+                    let next=canonical(next);
+                    if seen.contains(&next) || self.water_liters(next.0,next.1,next.2)==0 {
+                        continue;
+                    }
+                    seen.insert(next);
+                    if seen.len()<=MAX_COMPONENT {queue.push_back(next);}
+                }
+            }
+            global_seen.extend(seen);
+            if global_seen.len()>MAX_COMPONENT*MAX_COMPONENTS {break;}
+            // A capped/unfinished component must never teleport mass:
+            // connectivity to the other free surface was not established.
+            if free_surfaces.len()<2 || free_surfaces.len()>MAX_COMPONENT {continue;}
+            free_surfaces.sort_unstable_by(|a,b|a.1.total_cmp(&b.1));
+            let &(low,low_head,low_amount)=free_surfaces.first().unwrap();
+            let &(high,high_head,high_amount)=free_surfaces.last().unwrap();
+            if high_head-low_head<=0.001 || high==low {continue;}
+            let moved=((high_head-low_head)*125.0).ceil() as u16;
+            let moved=moved.min(100).min(high_amount).min(CAPACITY_L-low_amount);
+            if moved==0 {continue;}
+            self.water_assign(high,high_amount-moved);
+            self.water_assign(low,low_amount+moved);
+            // Continue updating this pressure conduit while unequal; only
+            // the root below terrain needs to remain a pressure seed.
+            self.water.active.insert(start);
+            transfers+=1;
+        }
+        transfers
+    }
+
     /// Move existing mass, never synthesize water when a cavity is excavated.
     fn transfer(&mut self, from:Cell, to:Cell, limit:u16) -> u16 {
         let from=canonical(from);
@@ -308,7 +369,8 @@ impl Terrain {
                 }
             }
         }
-        transfers+self.step_surface_flow(&processed)
+        transfers+=self.step_surface_flow(&processed);
+        transfers+self.step_conduit_pressure(&processed)
     }
     /// Evaporation transfers liquid to atmosphere; precipitation reverses it.
     /// Neither operation can increase the closed-system total.
@@ -510,6 +572,28 @@ mod tests {
         for _ in 0..10 {t.step_water(4096);}
         assert_eq!(t.water.surface_delta_liters,before);
         assert_eq!(t.water_liters(neighbor.0,neighbor.1,240),0);
+    }
+    #[test]
+    fn pressurized_u_tube_equalizes_through_a_roofed_bottom_passage() {
+        let mut t=Terrain::new();
+        let x=WORLD_SIZE/2;
+        let y=WORLD_SIZE/2;
+        // A closed floor and a roofed bottom passage connect two vertical
+        // water columns, without an exposed surface across the passage.
+        for dx in 0..=3 {t.set(x+dx,y,194,Block::Stone);}
+        for dx in 1..=2 {t.set(x+dx,y,196,Block::Stone);}
+        for z in 195..=200 {t.water_assign((x,y,z),CAPACITY_L);}
+        for z in 195..=198 {t.water_assign((x+3,y,z),CAPACITY_L);}
+        for dx in 1..=2 {t.water_assign((x+dx,y,195),CAPACITY_L);}
+        let before=t.water.surface_delta_liters;
+        t.water.activate((x+1,y,195));
+        let mut moves=0;
+        for _ in 0..40 {moves+=t.step_water(4096);}
+        assert!(moves>0,"connected flooded conduit must transmit pressure");
+        assert!(t.water_liters(x,y,200)<CAPACITY_L);
+        assert!(t.water_liters(x+3,y,199)>0);
+        assert_eq!(t.water.surface_delta_liters,before,
+            "pressure exchange must conserve every liter");
     }
     #[test]
     fn water_transfers_conserve_local_mass_and_wrap() {
