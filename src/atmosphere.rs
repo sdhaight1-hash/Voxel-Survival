@@ -2,7 +2,8 @@
 //! moisture is NOT an air voxel, a biome attribute, or a humidity percentage.
 //! The laboratory atmosphere is 16x16 periodic 64m regions, one 2000m layer.
 //! Wind is a prescribed passive-tracer field, not solved air dynamics.
-use crate::terrain::{wrap,WORLD_SIZE};
+use crate::terrain::{wrap,Terrain,WORLD_SIZE};
+use std::collections::HashMap;
 use std::f64::consts::TAU;
 
 pub const REGION_SIZE_M:i32=64;
@@ -26,6 +27,8 @@ pub struct Atmosphere {
     pub cells:Vec<AirCell>,
     pub time_seconds:f64,
     initial_water_kg:f64,
+    surface_evap_remainder:HashMap<(i32,i32),f64>,
+    soil_evap_remainder:HashMap<(i32,i32),f64>,
 }
 
 impl Atmosphere {
@@ -42,6 +45,8 @@ impl Atmosphere {
             cells,
             time_seconds:0.0,
             initial_water_kg:water*CELLS as f64,
+            surface_evap_remainder:HashMap::new(),
+            soil_evap_remainder:HashMap::new(),
         }
     }
     pub fn cell_index(x:i32,y:i32)->usize {
@@ -75,6 +80,57 @@ impl Atmosphere {
         cell.cloud_kg-=moved;
         moved
     }
+    /// Exchange finite moisture with exposed terrain near the player.
+    /// One liter of liquid water is approximately one kilogram of vapor.
+    /// All transfers are exact whole liters; fractional climate rates are
+    /// carried in per-column remainder storage, never silently discarded.
+    pub fn evaporate_near(&mut self,t:&mut Terrain,px:i32,py:i32,dt_seconds:f64)->u32 {
+        if dt_seconds<=0.0 {return 0;}
+        let mut total=0u32;
+        for dy in -6..=6 {
+            for dx in -6..=6 {
+                let x=wrap(px+dx);let y=wrap(py+dy);
+                let key=(x,y);
+                let idx=Self::cell_index(x,y);
+                let temp=self.cells[idx].temperature_c;
+                let rh=self.relative_humidity(x,y).clamp(0.0,1.5);
+                let demand=((1.0-rh)/0.25).clamp(0.0,2.5)
+                    *((temp-5.0)/22.0).clamp(0.0,2.0);
+                if let Some(wet)=t.exposed_surface_cell(x,y) {
+                    // Illustrative 4 mm/day potential evaporation for wet
+                    // tropical exposed water, scaled by vapor deficit/heat.
+                    let fractional=4.0*demand*dt_seconds/86_400.0
+                        +self.surface_evap_remainder.get(&key).copied().unwrap_or(0.0);
+                    let requested=(fractional.floor().max(0.0) as u32)
+                        .min(u16::MAX as u32) as u16;
+                    let moved=t.withdraw_surface_evaporation(wet,requested);
+                    if moved>0 {
+                        self.cells[idx].vapor_kg+=moved as f64;
+                        total+=moved as u32;
+                    }
+                    let remainder=if moved<requested {0.0}
+                        else {(fractional-moved as f64).clamp(0.0,0.999_999_999)};
+                    self.surface_evap_remainder.insert(key,remainder);
+                } else {self.surface_evap_remainder.remove(&key);}
+                // Soil evaporation slows as the surface dries and ceases
+                // when residual bound water is all that remains.
+                let soil_fractional=1.5*demand*dt_seconds/86_400.0
+                    +self.soil_evap_remainder.get(&key).copied().unwrap_or(0.0);
+                let requested=(soil_fractional.floor().max(0.0) as u32)
+                    .min(u16::MAX as u32) as u16;
+                let moved=t.withdraw_soil_evaporation(x,y,requested);
+                if moved>0 {
+                    self.cells[idx].vapor_kg+=moved as f64;
+                    total+=moved as u32;
+                }
+                let remainder=if moved<requested {0.0}
+                    else {(soil_fractional-moved as f64).clamp(0.0,0.999_999_999)};
+                self.soil_evap_remainder.insert(key,remainder);
+            }
+        }
+        total
+    }
+
     /// Conservatively forward-remap moisture over a periodic weather grid.
     /// This remains nonnegative even when F1 jumps thousands of seconds.
     /// A full weather engine would also advect air mass/heat and wind itself.
@@ -141,6 +197,37 @@ pub fn saturation_specific_humidity(temperature_c:f64)->f64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn accelerated_evaporation_moves_exact_mass_from_water_and_soil_to_vapor() {
+        let mut t=Terrain::new();
+        let mut a=Atmosphere::new_af();
+        let x=WORLD_SIZE/2;let y=WORLD_SIZE/2;
+        let bed=t.height(x,y)+1;
+        t.water_assign((x,y,bed),150);
+        let total_before=t.water_mass_error_liters() as f64+a.water_delta_kg();
+        let water_before=t.water_liters(x,y,bed);
+        let soil_before=t.soil_moisture_liters(x,y);
+        a.evaporate_near(&mut t,x,y,3.0*86_400.0);
+        assert!(t.water_liters(x,y,bed)<water_before);
+        assert!(t.soil_moisture_liters(x,y)<soil_before);
+        let total_after=t.water_mass_error_liters() as f64+a.water_delta_kg();
+        assert!((total_after-total_before).abs()<0.001);
+    }
+    #[test]
+    fn evaporation_integrates_fractional_rates_across_smaller_steps() {
+        let mut t1=Terrain::new();
+        let mut t2=Terrain::new();
+        let mut a1=Atmosphere::new_af();
+        let mut a2=Atmosphere::new_af();
+        let x=WORLD_SIZE/2;let y=WORLD_SIZE/2;
+        let z=t1.height(x,y)+1;
+        t1.water_assign((x,y,z),200);
+        t2.water_assign((x,y,z),200);
+        a1.evaporate_near(&mut t1,x,y,86_400.0);
+        for _ in 0..24 {a2.evaporate_near(&mut t2,x,y,3600.0);}
+        assert!((t1.water_liters(x,y,z) as i32
+            -t2.water_liters(x,y,z) as i32).abs()<=1);
+    }
     #[test]
     fn periodic_weather_regions_wrap_correctly() {
         assert_eq!(Atmosphere::cell_index(-1,0),Atmosphere::cell_index(WORLD_SIZE-1,0));
