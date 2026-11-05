@@ -85,11 +85,14 @@ pub fn build(t: &Terrain, center_x: i32, center_y: i32, radius: i32) -> Mesh {
                     max_height = max_height.max(h);
                 }
             }
+            // Keep edited underground tunnels visible without scanning the solid core.
+            let mut minimum_edit_z = WORLD_HEIGHT;
             // Include player-placed blocks above the original terrain surface.
             for (&(ex, ey, ez), _) in &t.edits {
                 if (0..CHUNK_SIZE).contains(&delta(ex, base_x))
                     && (0..CHUNK_SIZE).contains(&delta(ey, base_y)) {
                     max_height = max_height.max(ez);
+                    minimum_edit_z = minimum_edit_z.min(ez);
                 }
             }
             for ly in 0..32 {
@@ -97,8 +100,15 @@ pub fn build(t: &Terrain, center_x: i32, center_y: i32, radius: i32) -> Mesh {
                     let x = base_x + lx;
                     let y = base_y + ly;
                     let h = heights[(ly + 1) as usize][(lx + 1) as usize];
-                    // This is equivalent to traversing 32x32x32 sections in Z.
-                    for z in 0..=(max_height + 1).min(WORLD_HEIGHT - 1) {
+                    // Stone far below every exposed surface cannot contribute a face.
+                    // Keep a few subsurface layers and any edited underground cells.
+                    let lowest_neighbor = h
+                        .min(heights[ly as usize][(lx + 1) as usize])
+                        .min(heights[(ly + 2) as usize][(lx + 1) as usize])
+                        .min(heights[(ly + 1) as usize][lx as usize])
+                        .min(heights[(ly + 1) as usize][(lx + 2) as usize]);
+                    let start_z = (lowest_neighbor - 5).min(minimum_edit_z - 1).max(0);
+                    for z in start_z..=(max_height + 1).min(WORLD_HEIGHT - 1) {
                         let b = block(t, x, y, z, h);
                         if b == Block::Air { continue; }
                         for (face, &(dx,dy,dz)) in DIRECTIONS.iter().enumerate() {
