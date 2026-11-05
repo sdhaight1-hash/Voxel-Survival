@@ -618,6 +618,32 @@ mod tests {
             "hydraulic flow must conserve volume against implicit baseline");
     }
     #[test]
+    fn impermeable_shore_spill_flows_back_to_connected_lake() {
+        let mut t=Terrain::new();
+        let m=WORLD_SIZE/2;
+        // Radial bank of the authored elevated lake: r=78 is outside its
+        // initial shoreline, and r<=76 contains connected open lake water.
+        let lake_x=m-115;
+        let y=m+125;
+        let shore_x=lake_x+78;
+        let z=t.height(shore_x,y)+1;
+        assert_eq!(t.water_liters(shore_x,y,z),0);
+        t.water_assign((shore_x,y,z),1000);
+        let initial_delta=t.water.surface_delta_liters;
+        // No soil/atmosphere functions run: all spill must remain surface.
+        for _ in 0..150 {
+            t.step_water(4096);
+        }
+        let lake_return:u32=t.water.amounts.iter()
+            .filter(|(&(x,yy,z),&l)| yy==y && x>=lake_x && x<lake_x+77
+                && z>=126 && l>0)
+            .map(|(_, &liters)|liters as u32).sum();
+        assert!(lake_return>0,
+            "water must return across a valid downhill bank into the lake");
+        assert_eq!(t.water.surface_delta_liters,initial_delta,
+            "shore runoff must not evaporate or infiltrate implicitly");
+    }
+    #[test]
     fn surface_water_does_not_cross_a_solid_crest_from_below() {
         let mut t=Terrain::new();
         let m=WORLD_SIZE/2;
