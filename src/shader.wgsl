@@ -1,5 +1,6 @@
 struct Camera {
     view_proj: mat4x4<f32>,
+    viewport: vec4<f32>,
 };
 @group(0) @binding(0) var<uniform> camera: Camera;
 @group(1) @binding(0) var tiles: texture_2d_array<f32>;
@@ -30,4 +31,27 @@ fn vs_main(v: VertexInput) -> VertexOutput {
 fn fs_main(v: VertexOutput) -> @location(0) vec4<f32> {
     let color = textureSample(tiles, nearest_sampler, v.uv, i32(v.tile));
     return vec4<f32>(color.rgb * v.shade, 1.0);
+}
+
+@fragment
+fn fs_water(v: VertexOutput) -> @location(0) vec4<f32> {
+    let color = textureSample(tiles, nearest_sampler, v.uv, i32(v.tile));
+    return vec4<f32>(color.rgb, 0.58);
+}
+
+@vertex
+fn vs_overlay(@builtin(vertex_index) idx: u32) -> @builtin(position) vec4<f32> {
+    var triangle = array<vec2<f32>, 3>(
+        vec2<f32>(-1.0, -1.0),
+        vec2<f32>(3.0, -1.0),
+        vec2<f32>(-1.0, 3.0)
+    );
+    return vec4<f32>(triangle[idx], 0.0, 1.0);
+}
+@fragment
+fn fs_crosshair(@builtin(position) pixel: vec4<f32>) -> @location(0) vec4<f32> {
+    let d = abs(pixel.xy - camera.viewport.xy * 0.5);
+    let arm = (d.x < 1.25 && d.y < 8.0) || (d.y < 1.25 && d.x < 8.0);
+    if (!arm) { discard; }
+    return vec4<f32>(0.98, 0.98, 0.92, 1.0);
 }
