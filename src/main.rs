@@ -674,7 +674,8 @@ impl Game {
             self.hud_fps,self.hud_frame_ms,self.time_scale,self.world_time_seconds,
             water_liters,self.terrain.water.active.len(),
             self.terrain.water.surface_delta_liters,self.terrain.water.atmosphere_liters,
-            self.terrain.water_mass_error_liters(),
+            self.terrain.water_mass_error_liters()
+                +self.atmosphere.water_delta_kg().round() as i64,
             self.atmosphere.relative_humidity(sample.0,sample.1),
             self.atmosphere.cells[atmosphere::Atmosphere::cell_index(sample.0,sample.1)].temperature_c);
         self.queue.write_texture(
@@ -768,6 +769,12 @@ impl Game {
             self.soil_climate_seconds=0.0;
             self.terrain.step_soil(elapsed,4096);
             self.atmosphere.advance_af(elapsed);
+            self.atmosphere.evaporate_near(
+                &mut self.terrain,
+                self.player.pos.x.floor() as i32,
+                self.player.pos.y.floor() as i32,
+                elapsed,
+            );
         }
         let dirty=self.terrain.take_water_dirty();
         if !dirty.is_empty() {self.refresh_edited_chunks(&dirty);}
