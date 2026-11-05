@@ -10,6 +10,7 @@ glam = "0.27"
 noise = "0.9"
 bytemuck = { version = "1.16", features = ["derive"] }
 pollster = "0.3"
+font8x8 = "0.3"
 
 [dev-dependencies]
 naga = { version = "0.20", features = ["wgsl-in"] }
