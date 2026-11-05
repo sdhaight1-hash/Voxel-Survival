@@ -29,6 +29,12 @@ pub struct Atmosphere {
     initial_water_kg:f64,
     surface_evap_remainder:HashMap<(i32,i32),f64>,
     soil_evap_remainder:HashMap<(i32,i32),f64>,
+    rain_remainder:HashMap<(i32,i32),f64>,
+    /// Actually deposited liters, not an assumed Af climate target.
+    pub rain_delivered_liters:u64,
+    /// Requested storm liters that could not be delivered from finite cloud
+    /// storage or into an unblocked surface cell.
+    pub rain_unmet_liters:u64,
 }
 
 impl Atmosphere {
@@ -37,16 +43,22 @@ impl Atmosphere {
         let q_sat=saturation_specific_humidity(temp);
         // RH is an INITIAL CONDITION only: vapor mass remains authoritative.
         let water=q_sat*AIR_MASS_KG*0.83;
+        // A finite 2.5 g/m3 initial cloud reservoir supports early storms.
+        // Condensation and evaporation must replenish it; never auto-refill.
+        let initial_cloud_kg=AREA_M2*LAYER_HEIGHT_M*0.0025;
         let cells=vec![AirCell {
-            vapor_kg:water,cloud_kg:0.0,temperature_c:temp,
+            vapor_kg:water,cloud_kg:initial_cloud_kg,temperature_c:temp,
             wind_x_m_s:2.0,wind_y_m_s:0.5,
         };CELLS];
         Self {
             cells,
             time_seconds:0.0,
-            initial_water_kg:water*CELLS as f64,
+            initial_water_kg:(water+initial_cloud_kg)*CELLS as f64,
             surface_evap_remainder:HashMap::new(),
             soil_evap_remainder:HashMap::new(),
+            rain_remainder:HashMap::new(),
+            rain_delivered_liters:0,
+            rain_unmet_liters:0,
         }
     }
     pub fn cell_index(x:i32,y:i32)->usize {
@@ -129,6 +141,61 @@ impl Atmosphere {
                 let remainder=if moved<requested {0.0}
                     else {(soil_fractional-moved as f64).clamp(0.0,0.999_999_999)};
                 self.soil_evap_remainder.insert(key,remainder);
+            }
+        }
+        total
+    }
+
+
+    /// Exact overlap of an interval with a 12-hour storm every 48 hours.
+    /// The continuous integral makes storm amounts independent of F1 step size.
+    fn storm_cumulative_seconds(t:f64)->f64 {
+        const PERIOD:f64=172_800.0;
+        const WET:f64=43_200.0;
+        let t=t.max(0.0);
+        (t/PERIOD).floor()*WET+(t%PERIOD).min(WET)
+    }
+
+    /// Deliver real regional cloud mass to 1m2 columns near the player.
+    /// A storm requests 30 mm/day while active (mean 7.5 mm/day); lack of
+    /// cloud water becomes explicit unmet demand rather than invented rain.
+    /// The rest of the island is NOT yet covered; a regional catchment
+    /// deposition model is required before validating island-wide Af totals.
+    pub fn rain_near(&mut self,t:&mut Terrain,px:i32,py:i32,dt_seconds:f64)->u32 {
+        if dt_seconds<=0.0 {return 0;}
+        let from=(self.time_seconds-dt_seconds).max(0.0);
+        let to=self.time_seconds;
+        let mut total=0u32;
+        for dy in -6..=6 {
+            for dx in -6..=6 {
+                let x=wrap(px+dx);let y=wrap(py+dy);
+                let idx=Self::cell_index(x,y);
+                // Different weather regions experience storms at different
+                // phases. Cells inside the same 64m region share the clock.
+                let offset=(idx as u64*24_791%172_800) as f64;
+                let wet=(Self::storm_cumulative_seconds(to+offset)
+                    -Self::storm_cumulative_seconds(from+offset)).max(0.0);
+                let key=(x,y);
+                let fractional=30.0*wet/86_400.0
+                    +self.rain_remainder.get(&key).copied().unwrap_or(0.0);
+                let requested=(fractional.floor().max(0.0) as u32)
+                    .min(u16::MAX as u32) as u16;
+                if requested==0 {
+                    self.rain_remainder.insert(key,fractional);
+                    continue;
+                }
+                let available=self.cells[idx].cloud_kg.floor().max(0.0)
+                    .min(u16::MAX as f64) as u16;
+                let accepted=t.receive_precipitation(x,y,requested.min(available));
+                // Each accepted liter is debited immediately from cloud
+                // storage, with the matching credit in terrain's ledger.
+                self.cells[idx].cloud_kg-=accepted as f64;
+                self.rain_delivered_liters+=accepted as u64;
+                self.rain_unmet_liters+=(requested-accepted) as u64;
+                total+=accepted as u32;
+                // Do not carry unsatisfied demand into a perpetual drizzle.
+                // Only the <1L discretization remainder survives a tick.
+                self.rain_remainder.insert(key,fractional-requested as f64);
             }
         }
         total
@@ -230,6 +297,47 @@ mod tests {
         for _ in 0..24 {a2.evaporate_near(&mut t2,x,y,3600.0);}
         assert!((t1.water_liters(x,y,z) as i32
             -t2.water_liters(x,y,z) as i32).abs()<=1);
+    }
+
+    #[test]
+    fn storm_rainfall_is_real_cloud_mass_not_a_free_source() {
+        let mut t=Terrain::new();
+        let mut a=Atmosphere::new_af();
+        let (x,y)=(WORLD_SIZE/2+32,WORLD_SIZE/2+32);
+        a.time_seconds=172_800.0; // one full 48-hour interval
+        let idx=Atmosphere::cell_index(x,y);
+        let cloud_before=a.cells[idx].cloud_kg;
+        let before=t.water_mass_error_liters() as f64+a.water_delta_kg();
+        let delivered=a.rain_near(&mut t,x,y,172_800.0);
+        assert_eq!(delivered,169*15,"15 mm over 169 square meters");
+        assert!((a.cells[idx].cloud_kg-(cloud_before-delivered as f64)).abs()<0.001);
+        assert!((t.water_mass_error_liters() as f64+a.water_delta_kg()-before).abs()<0.001);
+        assert_eq!(a.rain_unmet_liters,0);
+    }
+    #[test]
+    fn empty_clouds_cannot_rain_even_when_af_storm_is_scheduled() {
+        let mut t=Terrain::new();
+        let mut a=Atmosphere::new_af();
+        for c in &mut a.cells {c.cloud_kg=0.0;}
+        let (x,y)=(WORLD_SIZE/2+32,WORLD_SIZE/2+32);
+        a.time_seconds=172_800.0;
+        assert_eq!(a.rain_near(&mut t,x,y,172_800.0),0);
+        assert_eq!(t.water.surface_delta_liters,0);
+        assert!(a.rain_unmet_liters>0);
+    }
+    #[test]
+    fn storm_depth_is_invariant_to_climate_substep_size() {
+        let mut coarse_t=Terrain::new();let mut fine_t=Terrain::new();
+        let mut coarse=Atmosphere::new_af();let mut fine=Atmosphere::new_af();
+        let (x,y)=(WORLD_SIZE/2+32,WORLD_SIZE/2+32);
+        coarse.time_seconds=172_800.0;
+        coarse.rain_near(&mut coarse_t,x,y,172_800.0);
+        for step in 1..=8 {
+            fine.time_seconds=step as f64*21_600.0;
+            fine.rain_near(&mut fine_t,x,y,21_600.0);
+        }
+        assert_eq!(coarse.rain_delivered_liters,fine.rain_delivered_liters);
+        assert_eq!(coarse_t.water.surface_delta_liters,fine_t.water.surface_delta_liters);
     }
     #[test]
     fn periodic_weather_regions_wrap_correctly() {
