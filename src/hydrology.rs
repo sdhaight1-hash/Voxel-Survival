@@ -19,6 +19,9 @@ pub struct WaterState {
     pub(crate) dirty: HashSet<Cell>,
     // Atmosphere is an explicitly finite reservoir, not a source of free rain.
     pub atmosphere_liters: u64,
+    // Signed deviation from finite, implicit initial surface-water inventory.
+    // Atmospheric/soil reservoirs must balance this delta in a closed system.
+    pub surface_delta_liters: i64,
 }
 impl WaterState {
     pub fn activate(&mut self, at:Cell) {
@@ -42,13 +45,16 @@ impl Terrain {
         // New empty cells created by mining are empty until water moves in.
         if self.edits.contains_key(&cell) {return 0;}
         if z > self.height(cell.0,cell.1)
-            && z<=self.initial_water_surface(cell.0,cell.1) {
+            && z<self.initial_water_surface(cell.0,cell.1) {
             CAPACITY_L
         } else {0}
     }
     fn water_assign(&mut self, cell:Cell, amount:u16) {
         let cell=canonical(cell);
-        self.water.amounts.insert(cell,amount.min(CAPACITY_L));
+        let old=self.water_liters(cell.0,cell.1,cell.2);
+        let new_amount=amount.min(CAPACITY_L);
+        self.water.surface_delta_liters+=new_amount as i64-old as i64;
+        self.water.amounts.insert(cell,new_amount);
         self.water.dirty.insert(cell);
         self.water.activate(cell);
     }
@@ -231,6 +237,26 @@ mod tests {
         assert_eq!(total,550);
     }
 
+    #[test]
+    fn initial_surface_elevation_is_voxel_top_not_top_plus_one() {
+        let t=Terrain::new();
+        let x=WORLD_SIZE/2-115;
+        let y=WORLD_SIZE/2+125;
+        assert_eq!(t.water_liters(x,y,125),1000);
+        assert_eq!(t.water_liters(x,y,126),0);
+        assert_eq!(t.initial_water_surface(x,y),126);
+    }
+    #[test]
+    fn closed_water_ledger_accounts_for_implicit_lakes_and_atmosphere() {
+        let mut t=Terrain::new();
+        let cell=(WORLD_SIZE/2-115,WORLD_SIZE/2+125,125);
+        assert_eq!(t.water.surface_delta_liters,0);
+        assert_eq!(t.evaporate(cell,100),100);
+        assert_eq!(t.water.surface_delta_liters,-100);
+        assert_eq!(t.water.surface_delta_liters+t.water.atmosphere_liters as i64,0);
+        assert_eq!(t.precipitate(cell,50),50);
+        assert_eq!(t.water.surface_delta_liters+t.water.atmosphere_liters as i64,0);
+    }
     #[test]
     fn lake_water_is_finite_and_does_not_refill_after_evaporation() {
         let mut t=Terrain::new();
