@@ -1,7 +1,7 @@
 //! Finite water bookkeeping. One voxel has capacity 1000 liters (1 m³).
 //! The initial ocean is a finite implicit volume field, never an infinite
 //! refill rule. Each withdrawn voxel is recorded as a sparse override.
-use crate::terrain::{wrap, Block, Terrain, SEA_LEVEL, WORLD_HEIGHT};
+use crate::terrain::{wrap, Block, Terrain, WORLD_HEIGHT};
 use std::collections::{HashMap, HashSet, VecDeque};
 
 pub type Cell = (i32, i32, i32);
@@ -41,7 +41,8 @@ impl Terrain {
         if let Some(&volume)=self.water.amounts.get(&cell) {return volume;}
         // New empty cells created by mining are empty until water moves in.
         if self.edits.contains_key(&cell) {return 0;}
-        if z > self.height(cell.0,cell.1) && z<=SEA_LEVEL {
+        if z > self.height(cell.0,cell.1)
+            && z<=self.initial_water_surface(cell.0,cell.1) {
             CAPACITY_L
         } else {0}
     }
