@@ -18,6 +18,9 @@ const VIEW_RADIUS: i32 = 3;
 const PLAYER_HEIGHT: f32 = 1.3;
 const PLAYER_RADIUS: f32 = 0.28;
 const EYE_HEIGHT: f32 = 1.18;
+const JUMP_SPEED: f32 = 7.5;
+const GRAVITY: f32 = 20.0;
+const MOUSE_SENSITIVITY: f32 = 0.002;
 
 #[repr(C)]
 #[derive(Copy, Clone, Pod, Zeroable)]
@@ -57,7 +60,9 @@ fn wrap_pos(v: f32) -> f32 { v.rem_euclid(WORLD_SIZE as f32) }
 
 fn update_player(p: &mut Player, t: &Terrain, keys: &HashSet<KeyCode>, dt: f32) {
     let forward = Vec3::new(p.yaw.cos(), p.yaw.sin(), 0.0);
-    let right = Vec3::new(-p.yaw.sin(), p.yaw.cos(), 0.0);
+    // In our Z-up coordinates, positive yaw turns the camera counterclockwise.
+    // Screen-right is the clockwise perpendicular to horizontal forward.
+    let right = Vec3::new(p.yaw.sin(), -p.yaw.cos(), 0.0);
     let mut movement = Vec3::ZERO;
     if keys.contains(&KeyCode::KeyW) { movement += forward; }
     if keys.contains(&KeyCode::KeyS) { movement -= forward; }
@@ -65,35 +70,42 @@ fn update_player(p: &mut Player, t: &Terrain, keys: &HashSet<KeyCode>, dt: f32) 
     if keys.contains(&KeyCode::KeyA) { movement -= right; }
     if movement.length_squared() > 0.0 { movement = movement.normalize() * 5.0 * dt; }
 
-    for axis in 0..2 {
-        let mut candidate = p.pos;
-        if axis == 0 { candidate.x = wrap_pos(candidate.x + movement.x); }
-        else { candidate.y = wrap_pos(candidate.y + movement.y); }
-        if !collides(t, candidate) {
-            p.pos = candidate;
-        } else if p.grounded {
-            // One-meter stair step over ordinary block-height terrain.
-            let raised = candidate + Vec3::Z;
-            if !collides(t, raised) && !collides(t, p.pos + Vec3::Z) {
-                p.pos = raised;
-            }
-        }
-    }
+    // Resolve jumping before horizontal motion, so a rising player can climb
+    // the face of a one-meter block instead of being blocked for that frame.
     if p.grounded && keys.contains(&KeyCode::Space) {
-        p.velocity_z = 6.0;
+        p.velocity_z = JUMP_SPEED;
         p.grounded = false;
     }
-    p.velocity_z = (p.velocity_z - 20.0 * dt).max(-35.0);
-    let candidate = p.pos + Vec3::Z * p.velocity_z * dt;
-    if collides(t, candidate) {
-        if p.velocity_z < 0.0 {
-            p.pos.z = candidate.z.floor() + 1.0;
-            p.grounded = true;
+
+    // Substep vertical movement to avoid skipping thin obstacles at high fall speed.
+    let previous_velocity = p.velocity_z;
+    p.velocity_z = (p.velocity_z - GRAVITY * dt).max(-35.0);
+    let displacement = (previous_velocity + p.velocity_z) * 0.5 * dt;
+    let steps = (displacement.abs() / 0.10).ceil().max(1.0) as usize;
+    for _ in 0..steps {
+        let candidate = p.pos + Vec3::Z * (displacement / steps as f32);
+        if collides(t, candidate) {
+            if displacement < 0.0 {
+                // The collision occurred while crossing the top of a block.
+                p.pos.z = candidate.z.floor() + 1.0;
+                p.grounded = true;
+            }
+            p.velocity_z = 0.0;
+            break;
         }
-        p.velocity_z = 0.0;
-    } else {
         p.pos = candidate;
         p.grounded = false;
+    }
+
+    // Only collide horizontally. The previous full-meter auto-step made
+    // characters teleport up cliffs instead of having to jump them.
+    let steps = (movement.length() / 0.10).ceil().max(1.0) as usize;
+    for _ in 0..steps {
+        let step = movement / steps as f32;
+        let x = Vec3::new(wrap_pos(p.pos.x + step.x), p.pos.y, p.pos.z);
+        if !collides(t, x) { p.pos = x; }
+        let y = Vec3::new(p.pos.x, wrap_pos(p.pos.y + step.y), p.pos.z);
+        if !collides(t, y) { p.pos = y; }
     }
     // Prevent leaving the vertical world bounds.
     p.pos.z = p.pos.z.clamp(0.0, (WORLD_HEIGHT - 2) as f32);
@@ -509,8 +521,8 @@ fn main() {
     event_loop.run(move |event, target| {
         match event {
             Event::DeviceEvent {event:DeviceEvent::MouseMotion {delta},..} if game.mouse_captured => {
-                game.player.yaw += delta.0 as f32 * 0.002;
-                game.player.pitch = (game.player.pitch - delta.1 as f32 * 0.002).clamp(-1.54,1.54);
+                game.player.yaw -= delta.0 as f32 * MOUSE_SENSITIVITY;
+                game.player.pitch = (game.player.pitch - delta.1 as f32 * MOUSE_SENSITIVITY).clamp(-1.54,1.54);
             }
             Event::WindowEvent {event,window_id} if window_id == window.id() => match event {
                 WindowEvent::CloseRequested => target.exit(),
@@ -577,5 +589,68 @@ mod shader_tests {
             naga::valid::ValidationFlags::all(),
             naga::valid::Capabilities::all(),
         ).validate(&module).expect("WGSL shader validation");
+    }
+}
+
+#[cfg(test)]
+mod movement_tests {
+    use super::*;
+
+    fn player(x: f32, y: f32, z: f32) -> Player {
+        Player { pos: Vec3::new(x,y,z), velocity_z:0.0, yaw:0.0,
+                 pitch:0.0, grounded:true }
+    }
+
+    #[test]
+    fn strafe_right_moves_screen_right_and_left_moves_screen_left() {
+        let t = Terrain::new();
+        let x = (WORLD_SIZE / 2) as f32 + 0.5;
+        let y = x;
+        let z = 230.0; // Air above terrain, so direction is isolated.
+        let mut p = player(x,y,z);
+        update_player(&mut p,&t,&HashSet::from([KeyCode::KeyD]),1.0/60.0);
+        assert!(p.pos.y < y, "D should move right, toward negative Y at yaw 0");
+        let mut p = player(x,y,z);
+        update_player(&mut p,&t,&HashSet::from([KeyCode::KeyA]),1.0/60.0);
+        assert!(p.pos.y > y, "A should move left, toward positive Y at yaw 0");
+    }
+
+    #[test]
+    fn jump_clears_one_meter_block_without_automatic_stepping() {
+        let mut t = Terrain::new();
+        let x = WORLD_SIZE / 2;
+        let y = WORLD_SIZE / 2;
+        // Small, flat arena well above the default terrain height.
+        for dx in -2..=7 {
+            for dy in -2..=2 {
+                t.set(x+dx,y+dy,200,Block::Stone);
+            }
+        }
+        for dy in -1..=1 { t.set(x+2,y+dy,201,Block::Stone); }
+        let mut p = player(x as f32+0.5,y as f32+0.5,201.0);
+        let mut peak = p.pos.z;
+        let keys = HashSet::from([KeyCode::KeyW,KeyCode::Space]);
+        for _ in 0..120 {
+            update_player(&mut p,&t,&keys,1.0/120.0);
+            peak = peak.max(p.pos.z);
+        }
+        assert!(peak > 202.15, "jump must exceed one-meter obstacle with clearance");
+        assert!(p.pos.x > x as f32 + 3.3, "player should traverse the block");
+    }
+
+    #[test]
+    fn walking_into_a_one_meter_wall_does_not_auto_climb() {
+        let mut t = Terrain::new();
+        let x = WORLD_SIZE / 2;
+        let y = WORLD_SIZE / 2;
+        for dx in -2..=5 {
+            for dy in -2..=2 { t.set(x+dx,y+dy,200,Block::Stone); }
+        }
+        for dy in -1..=1 { t.set(x+2,y+dy,201,Block::Stone); }
+        let mut p = player(x as f32+0.5,y as f32+0.5,201.0);
+        let keys = HashSet::from([KeyCode::KeyW]);
+        for _ in 0..100 { update_player(&mut p,&t,&keys,1.0/120.0); }
+        assert!(p.pos.x < x as f32 + 2.0);
+        assert!(p.pos.z < 201.1, "walking must not teleport up one meter");
     }
 }
