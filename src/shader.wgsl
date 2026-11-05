@@ -1,6 +1,7 @@
 struct Camera {
     view_proj: mat4x4<f32>,
     viewport: vec4<f32>,
+    sunlight: vec4<f32>,
 };
 @group(0) @binding(0) var<uniform> camera: Camera;
 @group(1) @binding(0) var tiles: texture_2d_array<f32>;
@@ -31,13 +32,13 @@ fn vs_main(v: VertexInput) -> VertexOutput {
 @fragment
 fn fs_main(v: VertexOutput) -> @location(0) vec4<f32> {
     let color = textureSample(tiles, nearest_sampler, v.uv, i32(v.tile));
-    return vec4<f32>(color.rgb * v.shade, 1.0);
+    return vec4<f32>(color.rgb * v.shade * (0.22 + 0.78 * camera.sunlight.x), 1.0);
 }
 
 @fragment
 fn fs_water(v: VertexOutput) -> @location(0) vec4<f32> {
     let color = textureSample(tiles, nearest_sampler, v.uv, i32(v.tile));
-    return vec4<f32>(color.rgb, 0.58);
+    return vec4<f32>(color.rgb * (0.25 + 0.75 * camera.sunlight.x), 0.58);
 }
 
 @vertex
