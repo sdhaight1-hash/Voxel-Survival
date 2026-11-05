@@ -5,7 +5,7 @@ use std::f64::consts::{PI, TAU};
 use crate::terrain::WORLD_SIZE;
 
 pub const WIDTH: u32 = 768;
-pub const HEIGHT: u32 = 124;
+pub const HEIGHT: u32 = 144;
 const COMPASS_W: i32 = 416;
 const INFO_X: i32 = 416;
 const PANEL_BG: [u8;4] = [8,18,24,178];
@@ -85,7 +85,8 @@ fn compass(out:&mut [u8],heading:f64) {
 }
 pub fn rasterize(yaw:f32,x:f64,y:f64,z:f64,fps:f32,frame_ms:f32,
     time_scale:u32, world_time_seconds:f64, water_liters:u16,
-    active_cells:usize, surface_delta_liters:i64, atmosphere_liters:u64) -> Vec<u8> {
+    active_cells:usize, surface_delta_liters:i64, atmosphere_liters:u64,
+    mass_error_liters:i64, relative_humidity:f64, air_temperature_c:f64) -> Vec<u8> {
     let mut out=vec![0u8;(WIDTH*HEIGHT*4) as usize];
     compass(&mut out,heading_degrees(yaw));
     fill(&mut out,INFO_X,0,320,HEIGHT as i32,PANEL_BG);
@@ -104,6 +105,10 @@ pub fn rasterize(yaw:f32,x:f64,y:f64,z:f64,fps:f32,frame_ms:f32,
     text(&mut out,INFO_X+12,103,
         &format!("DELTA {:+}L  AIR {}L",surface_delta_liters,atmosphere_liters),
         MUTED,1);
+    text(&mut out,INFO_X+12,122,
+        &format!("RH {:3.0}%  AIR {:4.1}C  ERR {}L",
+            relative_humidity*100.0,air_temperature_c,mass_error_liters),
+        ACCENT,1);
     centered_text(&mut out,COMPASS_W/2,68,
         &format!("V-LAT {:+6.2}  LON {:+7.2}",latitude_degrees(y),longitude_degrees(x)),
         MUTED,1);
@@ -138,14 +143,14 @@ mod tests {
     }
     #[test]
     fn lab_time_is_visible_and_updates_in_hud() {
-        let normal=rasterize(0.0,512.0,512.0,128.0,60.0,16.7,1,0.0,0,0,0,0);
-        let fast=rasterize(0.0,512.0,512.0,128.0,60.0,16.7,100,1200.0,0,0,0,0);
+        let normal=rasterize(0.0,512.0,512.0,128.0,60.0,16.7,1,0.0,0,0,0,0,0,0.83,27.0);
+        let fast=rasterize(0.0,512.0,512.0,128.0,60.0,16.7,100,1200.0,0,0,0,0,0,0.83,27.0);
         assert_ne!(normal,fast,"HUD must visibly reflect F1 rate and elapsed days");
         assert_eq!(normal.len(),(WIDTH*HEIGHT*4) as usize);
     }
     #[test]
     fn atlas_is_rgba_and_nonempty() {
-        let pixels=rasterize(0.0,512.0,512.0,128.0,60.0,16.7,1,0.0,0,0,0,0);
+        let pixels=rasterize(0.0,512.0,512.0,128.0,60.0,16.7,1,0.0,0,0,0,0,0,0.83,27.0);
         assert_eq!(pixels.len(),(WIDTH*HEIGHT*4) as usize);
         assert!(pixels.iter().any(|&v|v>0));
     }
