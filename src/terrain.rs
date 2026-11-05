@@ -42,8 +42,11 @@ impl Terrain {
             a.cos() * radius, a.sin() * radius,
             b.cos() * radius, b.sin() * radius,
         ]);
-        (108.0 + sample(65.0) * 38.0 + sample(240.0) * 13.0
-             + sample(900.0) * 4.0).round().clamp(2.0, 250.0) as i32
+        // Frequency is measured around the whole 1024 km torus. Small radii
+        // barely change across a player's local view; use local scales too.
+        (119.0 + sample(75.0) * 26.0 + sample(1_000.0) * 15.0
+             + sample(9_000.0) * 10.0 + sample(45_000.0) * 2.5)
+            .round().clamp(2.0, 250.0) as i32
     }
 
     pub fn block(&self, x: i32, y: i32, z: i32) -> Block {
@@ -86,6 +89,21 @@ mod tests {
             assert_eq!(t.height(x, y), t.height(x + WORLD_SIZE, y));
             assert_eq!(t.height(x, y), t.height(x, y - WORLD_SIZE));
         }
+    }
+    #[test]
+    fn terrain_has_local_relief() {
+        let t = Terrain::new();
+        let heights: Vec<_> = (0..64).step_by(4)
+            .flat_map(|y| (0..64).step_by(4)
+                .map(move |x| (x, y)))
+            .map(|(x,y)| t.height(WORLD_SIZE / 2 + x, WORLD_SIZE / 2 + y))
+            .collect();
+        assert!(heights.iter().max().unwrap() - heights.iter().min().unwrap() >= 2);
+    }
+    #[test]
+    fn starting_area_is_dry() {
+        let t = Terrain::new();
+        assert!(t.height(WORLD_SIZE / 2, WORLD_SIZE / 2) > SEA_LEVEL + 2);
     }
     #[test]
     fn edits_wrap_and_override() {
