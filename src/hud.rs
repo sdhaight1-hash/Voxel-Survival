@@ -87,7 +87,8 @@ pub fn rasterize(yaw:f32,x:f64,y:f64,z:f64,fps:f32,frame_ms:f32,
     time_scale:u32, world_time_seconds:f64, water_liters:u16,
     active_cells:usize, surface_delta_liters:i64, _atmosphere_liters:u64,
     mass_error_liters:i64, relative_humidity:f64, air_temperature_c:f64,
-    rain_liters:u64, unmet_rain_liters:u64) -> Vec<u8> {
+    rain_liters:u64, unmet_rain_liters:u64,
+    rain_month:usize, rain_gauge_mm:Option<u32>) -> Vec<u8> {
     let mut out=vec![0u8;(WIDTH*HEIGHT*4) as usize];
     compass(&mut out,heading_degrees(yaw));
     fill(&mut out,INFO_X,0,320,HEIGHT as i32,PANEL_BG);
@@ -102,7 +103,8 @@ pub fn rasterize(yaw:f32,x:f64,y:f64,z:f64,fps:f32,frame_ms:f32,
         &format!("F1 {:>4}x DAY {} {:02}:{:02}",time_scale,day,minutes/60,minutes%60),
         ACCENT,1);
     text(&mut out,INFO_X+12,85,
-        &format!("WATER {:04}L   ACTIVE {}",water_liters,active_cells),WHITE,1);
+        &format!("WATER {:04}L ACT {} M{:02}:{}mm",water_liters,active_cells,
+            rain_month+1,rain_gauge_mm.map_or("--".to_string(),|n|n.to_string())),WHITE,1);
     text(&mut out,INFO_X+12,103,
         &format!("D{:+}L R{}L MISS{}L",surface_delta_liters,rain_liters,unmet_rain_liters),
         MUTED,1);
@@ -144,14 +146,14 @@ mod tests {
     }
     #[test]
     fn lab_time_is_visible_and_updates_in_hud() {
-        let normal=rasterize(0.0,512.0,512.0,128.0,60.0,16.7,1,0.0,0,0,0,0,0,0.83,27.0,0,0);
-        let fast=rasterize(0.0,512.0,512.0,128.0,60.0,16.7,100,1200.0,0,0,0,0,0,0.83,27.0,0,0);
+        let normal=rasterize(0.0,512.0,512.0,128.0,60.0,16.7,1,0.0,0,0,0,0,0,0.83,27.0,0,0,0,None);
+        let fast=rasterize(0.0,512.0,512.0,128.0,60.0,16.7,100,1200.0,0,0,0,0,0,0.83,27.0,0,0,0,None);
         assert_ne!(normal,fast,"HUD must visibly reflect F1 rate and elapsed days");
         assert_eq!(normal.len(),(WIDTH*HEIGHT*4) as usize);
     }
     #[test]
     fn atlas_is_rgba_and_nonempty() {
-        let pixels=rasterize(0.0,512.0,512.0,128.0,60.0,16.7,1,0.0,0,0,0,0,0,0.83,27.0,0,0);
+        let pixels=rasterize(0.0,512.0,512.0,128.0,60.0,16.7,1,0.0,0,0,0,0,0,0.83,27.0,0,0,0,None);
         assert_eq!(pixels.len(),(WIDTH*HEIGHT*4) as usize);
         assert!(pixels.iter().any(|&v|v>0));
     }
