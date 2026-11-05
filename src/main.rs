@@ -955,7 +955,7 @@ mod movement_tests {
         let mut p = player(x as f32+0.5,y as f32+0.5,201.0);
         let keys = HashSet::from([KeyCode::KeyW]);
         for _ in 0..100 { update_player(&mut p,&t,&keys,1.0/120.0); }
-        assert!(p.pos.x < x as f32 + 2.0);
+        assert!(p.pos.x < x as f64 + 2.0);
         assert!(p.pos.z < 201.1, "walking must not teleport up one meter");
     }
 }
