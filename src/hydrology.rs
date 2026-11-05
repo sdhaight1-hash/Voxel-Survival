@@ -232,6 +232,33 @@ mod tests {
     }
 
     #[test]
+    fn lake_water_is_finite_and_does_not_refill_after_evaporation() {
+        let mut t=Terrain::new();
+        let x=WORLD_SIZE/2-115;
+        let y=WORLD_SIZE/2+125;
+        assert_eq!(t.water_liters(x,y,125),CAPACITY_L);
+        assert_eq!(t.evaporate((x,y,125),CAPACITY_L),CAPACITY_L);
+        assert_eq!(t.water_liters(x,y,125),0);
+        assert_eq!(t.block(x,y,125),Block::Air);
+        assert_eq!(t.water.atmosphere_liters,CAPACITY_L as u64);
+    }
+    #[test]
+    fn digging_under_the_lake_moves_existing_water_not_new_water() {
+        let mut t=Terrain::new();
+        let x=WORLD_SIZE/2-115;
+        let y=WORLD_SIZE/2+125;
+        let floor=t.height(x,y);
+        assert!(floor<126);
+        assert!(t.block(x,y,floor).solid());
+        t.set(x,y,floor,Block::Air);
+        assert_eq!(t.water_liters(x,y,floor),0);
+        t.step_water(512);
+        assert!(t.water_liters(x,y,floor)>0,"lake must reach mined floor");
+        let moved=t.water_liters(x,y,floor);
+        assert!(moved<=CAPACITY_L);
+        assert_eq!(t.water_liters(x,y,floor+1),CAPACITY_L-moved);
+    }
+    #[test]
     fn a_mined_cavity_does_not_generate_water() {
         let mut t=Terrain::new();
         let x=0;
