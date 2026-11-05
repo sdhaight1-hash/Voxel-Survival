@@ -34,7 +34,146 @@ impl WaterState {
         }
     }
 }
+// A surface column is an independent fluid computation over voxel terrain;
+// `Block::Water` is only a compatibility view for collision/meshing.
+#[derive(Clone,Copy,Debug)]
+struct SurfaceColumn {
+    bed: i32,
+    liters: u32,
+    head_m: f64,
+    blocked: bool,
+}
+
 impl Terrain {
+    /// Water surface above a voxel terrain column. Ignore enclosed columns
+    /// or disjoint floating liquid; those need a local 3D/conduit solver.
+    fn surface_column(&self,x:i32,y:i32)->SurfaceColumn {
+        let x=wrap(x);let y=wrap(y);
+        let bed=(self.height(x,y)+1).min(WORLD_HEIGHT);
+        let initial=self.initial_water_surface(x,y);
+        let mut liters=0u32;
+        let mut seen_air=false;
+        let mut blocked=false;
+        for z in bed..WORLD_HEIGHT {
+            let cell=(x,y,z);
+            if self.edits.get(&cell).is_some_and(|b|b.solid()) {
+                blocked=true;
+                seen_air=true;
+                continue;
+            }
+            let amount=if let Some(&amount)=self.water.amounts.get(&cell) {
+                amount
+            } else if !self.edits.contains_key(&cell) && z<initial {
+                CAPACITY_L
+            } else {0};
+            if amount==0 {seen_air=true;}
+            else {
+                if seen_air {blocked=true;} // air gap: not a height field
+                liters+=amount as u32;
+            }
+        }
+        let depth=liters as f64/CAPACITY_L as f64;
+        // A consistent invisible micro-relief field; its influence is
+        // limited to thin runoff. Deep lake surfaces are not artificially
+        // perturbed by the unresolved terrain slope.
+        let mx=crate::terrain::delta(x,crate::terrain::WORLD_SIZE/2) as f64;
+        let my=crate::terrain::delta(y,crate::terrain::WORLD_SIZE/2) as f64;
+        let r=(mx+115.0).hypot(my-125.0);
+        let lake_grade=0.08*((r-78.0)/25.0).clamp(0.0,1.0);
+        let small_roughness=0.01*(mx/23.0).sin()*(my/19.0).cos();
+        let micro=lake_grade+small_roughness;
+        let head_m=bed as f64+depth+micro*(1.0-depth/0.25).clamp(0.0,1.0);
+        SurfaceColumn {bed,liters,head_m,blocked}
+    }
+
+    /// Remove a scheduled flux from the top of an open water column.
+    fn remove_surface_liters(&mut self,(x,y):(i32,i32),mut amount:u32,bed:i32) {
+        for z in (bed..WORLD_HEIGHT).rev() {
+            if amount==0 {break;}
+            let current=self.water_liters(x,y,z);
+            let moved=amount.min(current as u32) as u16;
+            if moved>0 {
+                self.water_assign((x,y,z),current-moved);
+                amount-=moved as u32;
+            }
+        }
+        assert_eq!(amount,0,"surface flux donor lacked water");
+    }
+    /// Store a scheduled flux in the lowest available cells above the bed.
+    fn add_surface_liters(&mut self,(x,y):(i32,i32),mut amount:u32,bed:i32) {
+        for z in bed..WORLD_HEIGHT {
+            if amount==0 {break;}
+            if self.block(x,y,z).solid() {continue;}
+            let current=self.water_liters(x,y,z);
+            let moved=amount.min((CAPACITY_L-current) as u32) as u16;
+            if moved>0 {
+                self.water_assign((x,y,z),current+moved);
+                amount-=moved as u32;
+            }
+        }
+        assert_eq!(amount,0,"surface flux receiver lacked capacity");
+    }
+
+    /// Schedule conservative edge transfers from the same snapshot. All
+    /// fluxes are committed after the calculations, avoiding iteration-order
+    /// dependent hydraulic head changes within one step.
+    fn step_surface_flow(&mut self,active_cells:&[Cell]) -> usize {
+        let mut touched=HashSet::new();
+        for &(x,y,_) in active_cells {
+            for (dx,dy) in [(0,0),(-1,0),(1,0),(0,-1),(0,1)] {
+                touched.insert((wrap(x+dx),wrap(y+dy)));
+            }
+        }
+        let mut columns=HashMap::with_capacity(touched.len());
+        for &(x,y) in &touched {
+            columns.insert((x,y),self.surface_column(x,y));
+        }
+        let mut coords:Vec<_>=touched.into_iter().collect();
+        coords.sort_unstable();
+        let mut taken:HashMap<(i32,i32),u32>=HashMap::new();
+        let mut received:HashMap<(i32,i32),u32>=HashMap::new();
+        let mut fluxes=Vec::new();
+        for &(x,y) in &coords {
+            let here=(x,y);
+            for there in [(wrap(x+1),y),(x,wrap(y+1))] {
+                let Some(&a)=columns.get(&here) else {continue;};
+                let Some(&b)=columns.get(&there) else {continue;};
+                if a.blocked || b.blocked {continue;}
+                let (from,to,source,dest)=if a.head_m>b.head_m {
+                    (here,there,a,b)
+                } else {(there,here,b,a)};
+                let difference=source.head_m-dest.head_m;
+                if difference<=0.000_001 {continue;}
+                // A complete voxel step is still a real spill barrier. A
+                // microslope never allows crossing a solid one-meter wall.
+                let crest=source.bed.max(dest.bed) as f64;
+                let spillable=((source.head_m-crest).max(0.0)
+                    *CAPACITY_L as f64).floor() as u32;
+                let available=spillable.min(source.liters)
+                    .saturating_sub(*taken.get(&from).unwrap_or(&0));
+                let capacity=((WORLD_HEIGHT-dest.bed).max(0) as u32)
+                    *CAPACITY_L as u32;
+                let free=capacity.saturating_sub(dest.liters)
+                    .saturating_sub(*received.get(&to).unwrap_or(&0));
+                // Damped, bounded hydrostatic flux. Momentum will be added
+                // separately for fast rivers, waterfalls and floods.
+                let requested=(difference*500.0).ceil() as u32;
+                let liters=requested.min(250).min(available).min(free);
+                if liters==0 {continue;}
+                *taken.entry(from).or_default()+=liters;
+                *received.entry(to).or_default()+=liters;
+                fluxes.push((from,to,liters));
+            }
+        }
+        for (&cell,&amount) in &taken {
+            self.remove_surface_liters(cell,amount,columns[&cell].bed);
+        }
+        for (&cell,&amount) in &received {
+            self.add_surface_liters(cell,amount,columns[&cell].bed);
+        }
+        fluxes.len()
+    }
+
     pub fn water_liters(&self, x:i32,y:i32,z:i32) -> u16 {
         if !(0..WORLD_HEIGHT).contains(&z) {return 0;}
         let cell=(wrap(x),wrap(y),z);
@@ -142,27 +281,34 @@ impl Terrain {
         let mut pending:Vec<Cell>=self.water.active.drain().collect();
         pending.sort_unstable();
         let mut transfers=0;
+        let mut processed=Vec::new();
         for (i,cell) in pending.into_iter().enumerate() {
             if i>=max_cells {
                 self.water.active.insert(cell);
                 continue;
             }
+            processed.push(cell);
             if self.water_liters(cell.0,cell.1,cell.2)==0 {continue;}
-            let below=(cell.0,cell.1,cell.2-1);
-            if self.transfer(cell,below,500)>0 {transfers+=1;}
-            for n in [ (cell.0-1,cell.1,cell.2),
-                       (cell.0+1,cell.1,cell.2),
-                       (cell.0,cell.1-1,cell.2),
-                       (cell.0,cell.1+1,cell.2) ] {
-                if self.block(n.0,n.1,n.2).solid() {continue;}
-                let a=self.water_liters(cell.0,cell.1,cell.2);
-                let b=self.water_liters(n.0,n.1,n.2);
-                if a>b+1 && self.transfer(cell,n,(a-b)/4)>0 {
-                    transfers+=1;
+            // Gravity in cavities and unsupported cells stays on the local
+            // voxel adapter until the conduit/pressure phase is integrated.
+            if self.transfer(cell,(cell.0,cell.1,cell.2-1),500)>0 {
+                transfers+=1;
+            }
+            // Below original terrain, excavated tunnels use the existing
+            // local sideways transfer; the free surface uses head fluxes.
+            if cell.2<=self.height(cell.0,cell.1) {
+                for n in [(cell.0-1,cell.1,cell.2),
+                          (cell.0+1,cell.1,cell.2),
+                          (cell.0,cell.1-1,cell.2),
+                          (cell.0,cell.1+1,cell.2)] {
+                    if self.block(n.0,n.1,n.2).solid() {continue;}
+                    let a=self.water_liters(cell.0,cell.1,cell.2);
+                    let b=self.water_liters(n.0,n.1,n.2);
+                    if a>b+1 && self.transfer(cell,n,(a-b)/4)>0 {transfers+=1;}
                 }
             }
         }
-        transfers
+        transfers+self.step_surface_flow(&processed)
     }
     /// Evaporation transfers liquid to atmosphere; precipitation reverses it.
     /// Neither operation can increase the closed-system total.
@@ -303,6 +449,64 @@ mod tests {
         assert_eq!(t.evaporate(at,125),125);
         assert_eq!(t.water.atmosphere_liters,125);
         assert_eq!(t.water_liters(at.0,at.1,at.2),175);
+    }
+    #[test]
+    fn surface_column_has_absolute_head_on_uneven_ocean_floor() {
+        let t=Terrain::new();
+        let a=t.surface_column(0,0);
+        let b=t.surface_column(0,80);
+        assert_eq!(t.initial_water_surface(0,0),110);
+        assert_eq!(t.initial_water_surface(0,80),110);
+        assert!((a.head_m-110.0).abs()<0.001);
+        assert!((b.head_m-110.0).abs()<0.001);
+        assert_ne!(a.liters,b.liters,"different bed depths hold different volume");
+    }
+    #[test]
+    fn level_lake_and_ocean_never_spontaneously_flow() {
+        let mut t=Terrain::new();
+        let lake=(WORLD_SIZE/2-115,WORLD_SIZE/2+125,125);
+        t.water.activate(lake);
+        let ocean=(0,0,109);
+        t.water.activate(ocean);
+        for _ in 0..10_000 {
+            assert_eq!(t.step_water(4096),0);
+        }
+        assert_eq!(t.water.surface_delta_liters,0);
+        assert!(t.water.amounts.is_empty());
+    }
+    #[test]
+    fn displaced_water_spreads_downhill_and_conserves_exact_volume() {
+        let mut t=Terrain::new();
+        // A non-porous temporary spill beside a connected lake bank.
+        let m=WORLD_SIZE/2;
+        let y=m+125;
+        let x=m-115+79; // just outside the +78m water shoreline
+        let z=t.height(x,y)+1;
+        assert!(z>=126);
+        t.water_assign((x,y,z),1000);
+        let initial_delta=t.water.surface_delta_liters;
+        let mut has_flow=false;
+        for _ in 0..100 {
+            if t.step_water(4096)>0 {has_flow=true;}
+            if t.water.active.is_empty(){break;}
+        }
+        assert!(has_flow,"spill should move according to head");
+        assert_eq!(t.water.surface_delta_liters,initial_delta,
+            "hydraulic flow must conserve volume against implicit baseline");
+    }
+    #[test]
+    fn surface_water_does_not_cross_a_solid_crest_from_below() {
+        let mut t=Terrain::new();
+        let m=WORLD_SIZE/2;
+        let source=(m,m,240);
+        let neighbor=(m+1,m,240);
+        t.water_assign(source,100);
+        // A cap at z240 obstructs the receiving column.
+        t.set(neighbor.0,neighbor.1,240,Block::Stone);
+        let before=t.water.surface_delta_liters;
+        for _ in 0..10 {t.step_water(4096);}
+        assert_eq!(t.water.surface_delta_liters,before);
+        assert_eq!(t.water_liters(neighbor.0,neighbor.1,240),0);
     }
     #[test]
     fn water_transfers_conserve_local_mass_and_wrap() {
