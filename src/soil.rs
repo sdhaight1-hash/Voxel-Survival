@@ -93,6 +93,26 @@ impl Terrain {
         self.soil.columns.insert(key,new);
     }
 
+    /// Evaporate accessible topsoil moisture to an external regional vapor
+    /// inventory. The caller must credit exactly the returned liters.
+    pub fn withdraw_soil_evaporation(&mut self,x:i32,y:i32,requested:u16)->u16 {
+        let key=(wrap(x),wrap(y));
+        let material=SoilMaterial::from_terrain(self,key.0,key.1);
+        if material.capacity_l==0 {return 0;}
+        let mut column=self.soil.columns.get(&key).copied().unwrap_or(SoilColumn {
+            moisture_l:material.initial_l,groundwater_l:0,
+            infiltration_remainder:0.0,percolation_remainder:0.0,
+        });
+        // Only near-surface accessible water evaporates. Drier soil retains
+        // a finite residual; detailed capillary transport comes later.
+        let moved=requested.min(column.moisture_l.saturating_sub(20));
+        if moved>0 {
+            column.moisture_l-=moved;
+            self.update_soil_column(key,column);
+        }
+        moved
+    }
+
     /// Advance only active columns; max 1m² of near-surface soil per column.
     /// The 1m deep topsoil has a finite pore volume, and finite groundwater
     /// storage below it. No off-world sink, infinite refill, or free water.
