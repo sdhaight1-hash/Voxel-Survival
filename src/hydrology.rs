@@ -346,6 +346,21 @@ impl Terrain {
         Some((x,y,z))
     }
 
+    /// Receive precipitation from a regional cloud reservoir into the
+    /// lowest available open cell. The caller debits exactly returned liters
+    /// from cloud mass; blocked or full columns accept nothing.
+    pub(crate) fn receive_precipitation(&mut self,x:i32,y:i32,requested:u16)->u16 {
+        let (x,y)=(wrap(x),wrap(y));
+        let col=self.surface_column(x,y);
+        if col.blocked{return 0;}
+        let z=col.bed+(col.liters/CAPACITY_L as u32) as i32;
+        if z>=WORLD_HEIGHT || self.block(x,y,z).solid(){return 0;}
+        let current=self.water_liters(x,y,z);
+        let added=requested.min(CAPACITY_L-current);
+        if added>0 {self.water_assign((x,y,z),current+added);}
+        added
+    }
+
     /// Remove surface water for transfer into a spatial atmosphere.
     /// Unlike the legacy evaporate() API, it does not use the single global
     /// atmosphere counter. The caller must credit the regional vapor store.
