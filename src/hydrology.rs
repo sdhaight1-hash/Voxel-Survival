@@ -2,7 +2,7 @@
 //! The initial ocean is a finite implicit volume field, never an infinite
 //! refill rule. Each withdrawn voxel is recorded as a sparse override.
 use crate::terrain::{wrap, Block, Terrain, SEA_LEVEL, WORLD_HEIGHT};
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 
 pub type Cell = (i32, i32, i32);
 pub const CAPACITY_L: u16 = 1000;
@@ -54,6 +54,65 @@ impl Terrain {
     pub fn take_water_dirty(&mut self) -> HashSet<Cell> {
         std::mem::take(&mut self.water.dirty)
     }
+    /// Place a solid voxel, displacing its finite water volume into reachable
+    /// cells. Find enough capacity *before* changing anything: failed
+    /// placement must leave both water and terrain exactly unchanged.
+    pub fn try_place_solid(&mut self, at:Cell, block:Block) -> bool {
+        if !block.solid() || !(0..WORLD_HEIGHT).contains(&at.2) {return false;}
+        let at=canonical(at);
+        if self.block(at.0,at.1,at.2).solid() {return false;}
+        let liters=self.water_liters(at.0,at.1,at.2);
+        if liters==0 {
+            self.set(at.0,at.1,at.2,block);
+            return true;
+        }
+
+        // Breadth-first local displacement can move water up through a full
+        // water column to its free surface. Never teleport through a solid.
+        // A bounded search prevents pathologically expensive block placement.
+        const MAX_SEARCH:usize=4096;
+        let mut visited=HashSet::from([at]);
+        let mut queue=VecDeque::from([at]);
+        let mut destinations:Vec<(Cell,u16)>=Vec::new();
+        let mut remaining=liters;
+        while let Some(cell)=queue.pop_front() {
+            if visited.len()>MAX_SEARCH || remaining==0 {break;}
+            // Prefer the cell above, then lateral paths; gravity will settle
+            // the transferred water during subsequent simulation steps.
+            let around=[
+                (cell.0,cell.1,cell.2+1),
+                (cell.0-1,cell.1,cell.2),
+                (cell.0+1,cell.1,cell.2),
+                (cell.0,cell.1-1,cell.2),
+                (cell.0,cell.1+1,cell.2),
+                (cell.0,cell.1,cell.2-1),
+            ];
+            for next in around {
+                if !(0..WORLD_HEIGHT).contains(&next.2) {continue;}
+                let next=canonical(next);
+                if !visited.insert(next) || self.block(next.0,next.1,next.2).solid() {
+                    continue;
+                }
+                let available=CAPACITY_L-self.water_liters(next.0,next.1,next.2);
+                if available>0 {
+                    let moved=remaining.min(available);
+                    destinations.push((next,moved));
+                    remaining-=moved;
+                    if remaining==0 {break;}
+                }
+                if visited.len()<=MAX_SEARCH {queue.push_back(next);}
+            }
+        }
+        if remaining!=0 {return false;}
+        self.water_assign(at,0);
+        for (cell,amount) in destinations {
+            let current=self.water_liters(cell.0,cell.1,cell.2);
+            self.water_assign(cell,current+amount);
+        }
+        self.set(at.0,at.1,at.2,block);
+        true
+    }
+
     /// Move existing mass, never synthesize water when a cavity is excavated.
     fn transfer(&mut self, from:Cell, to:Cell, limit:u16) -> u16 {
         let from=canonical(from);
@@ -128,6 +187,49 @@ impl Terrain {
 mod tests {
     use super::*;
     use crate::terrain::WORLD_SIZE;
+    #[test]
+    fn placing_inside_water_displaces_every_liter_and_preserves_surroundings() {
+        let mut t=Terrain::new();
+        let x=WORLD_SIZE/2;
+        let y=WORLD_SIZE/2;
+        let center=(x,y,240);
+        t.water_assign(center,750);
+        t.water_assign((x,y,241),0);
+        let before:u32=t.water.amounts.values().map(|&v|v as u32).sum();
+        assert!(t.try_place_solid(center,Block::Stone));
+        assert_eq!(t.block(x,y,240),Block::Stone);
+        assert_eq!(t.water_liters(x,y,240),0);
+        assert_eq!(t.water_liters(x,y,241),750);
+        assert_eq!(before,t.water.amounts.values().map(|&v|v as u32).sum());
+    }
+
+    #[test]
+    fn placing_into_full_water_column_moves_volume_to_surface() {
+        let mut t=Terrain::new();
+        let x=WORLD_SIZE/2;
+        let y=WORLD_SIZE/2;
+        for z in 232..=235 {t.water_assign((x,y,z),CAPACITY_L);}
+        let before:u32=t.water.amounts.values().map(|&v|v as u32).sum();
+        assert!(t.try_place_solid((x,y,232),Block::Dirt));
+        assert_eq!(t.block(x,y,232),Block::Dirt);
+        assert_eq!(before,t.water.amounts.values().map(|&v|v as u32).sum());
+    }
+
+    #[test]
+    fn underwater_mining_does_not_erase_adjacent_water() {
+        let mut t=Terrain::new();
+        let x=WORLD_SIZE/2;
+        let y=WORLD_SIZE/2;
+        t.set(x,y,239,Block::Stone);
+        t.water_assign((x,y,240),550);
+        t.set(x,y,239,Block::Air);
+        assert_eq!(t.water_liters(x,y,239),0);
+        assert_eq!(t.water_liters(x,y,240),550);
+        t.step_water(64);
+        let total:u32=t.water.amounts.values().map(|&v|v as u32).sum();
+        assert_eq!(total,550);
+    }
+
     #[test]
     fn a_mined_cavity_does_not_generate_water() {
         let mut t=Terrain::new();
