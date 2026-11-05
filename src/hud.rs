@@ -145,7 +145,7 @@ mod tests {
     }
     #[test]
     fn atlas_is_rgba_and_nonempty() {
-        let pixels=rasterize(0.0,512.0,512.0,128.0,60.0,16.7,1,0.0);
+        let pixels=rasterize(0.0,512.0,512.0,128.0,60.0,16.7,1,0.0,0,0,0,0);
         assert_eq!(pixels.len(),(WIDTH*HEIGHT*4) as usize);
         assert!(pixels.iter().any(|&v|v>0));
     }
