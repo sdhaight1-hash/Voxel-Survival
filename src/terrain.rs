@@ -2,7 +2,7 @@ use noise::{NoiseFn, Perlin};
 use std::collections::HashMap;
 use crate::hydrology::WaterState;
 
-pub const WORLD_SIZE: i32 = 1_024_000;
+pub const WORLD_SIZE: i32 = 1_024; // Hydrology lab only; main remains 1,024,000.
 pub const WORLD_HEIGHT: i32 = 256;
 pub const CHUNK_SIZE: i32 = 32;
 pub const SEA_LEVEL: i32 = 110;
@@ -36,19 +36,80 @@ pub struct Terrain {
 impl Terrain {
     pub fn new() -> Self { Self { noise: Perlin::new(42), edits: HashMap::new(), water: WaterState::default() } }
 
-    // Periodic embedding of X/Y into four dimensions. The map has no seam.
-    pub fn height(&self, x: i32, y: i32) -> i32 {
-        let a = wrap(x) as f64 * std::f64::consts::TAU / WORLD_SIZE as f64;
-        let b = wrap(y) as f64 * std::f64::consts::TAU / WORLD_SIZE as f64;
-        let sample = |radius: f64| self.noise.get([
-            a.cos() * radius, a.sin() * radius,
-            b.cos() * radius, b.sin() * radius,
+    // Coordinates below use toroidal *meters* relative to the map center.
+    // The lab is deliberately authored for testable waterways; production
+    // geology and climate generation are not being replaced.
+    fn lab_xy(x:i32,y:i32) -> (f64,f64) {
+        (delta(wrap(x),WORLD_SIZE/2) as f64,
+         delta(wrap(y),WORLD_SIZE/2) as f64)
+    }
+    fn river(x:f64,y:f64) -> Option<(f64,f64)> {
+        if !(-125.0..=365.0).contains(&x) {return None;}
+        let t=((x+115.0)/475.0).clamp(0.0,1.0);
+        let channel_y=125.0-190.0*t+(t*std::f64::consts::TAU*2.0).sin()*9.0;
+        let distance=(y-channel_y).abs();
+        // The river falls from lake surface +126m to ocean +110m.
+        let surface=126.0-16.0*t;
+        Some((distance,surface))
+    }
+    fn lake_distance(x:f64,y:f64) -> f64 {
+        ((x+115.0).powi(2)+(y-125.0).powi(2)).sqrt()
+    }
+    fn swamp_distance(x:f64,y:f64) -> f64 {
+        (((x-115.0)/85.0).powi(2)+((y+125.0)/62.0).powi(2)).sqrt()
+    }
+    /// Initial finite free-surface elevation. This is an INITIAL CONDITION,
+    /// not a refilling source: edited/depleted cells use sparse overrides.
+    pub fn initial_water_surface(&self,x:i32,y:i32) -> i32 {
+        let (x,y)=Self::lab_xy(x,y);
+        if Self::lake_distance(x,y)<78.0 {return 126;}
+        if let Some((distance,surface))=Self::river(x,y) {
+            if distance<=9.0 {return surface.floor() as i32;}
+        }
+        if Self::swamp_distance(x,y)<1.0 {return 115;}
+        SEA_LEVEL
+    }
+
+    pub fn height(&self,x:i32,y:i32) -> i32 {
+        let (x,y)=Self::lab_xy(x,y);
+        let radius=x.hypot(y);
+        // A coastal shelf rises from seabed +76m to dry inland +140m.
+        // Beyond 410m radius the floor is level: both torus seams match.
+        let island=((410.0-radius)/115.0).clamp(0.0,1.0);
+        let island=island*island*(3.0-2.0*island);
+        let phase_x=std::f64::consts::TAU*wrap(x as i32+WORLD_SIZE/2) as f64/WORLD_SIZE as f64;
+        let phase_y=std::f64::consts::TAU*wrap(y as i32+WORLD_SIZE/2) as f64/WORLD_SIZE as f64;
+        let noise=self.noise.get([
+            phase_x.cos()*32.0,phase_x.sin()*32.0,
+            phase_y.cos()*32.0,phase_y.sin()*32.0,
         ]);
-        // Frequency is measured around the whole 1024 km torus. Small radii
-        // barely change across a player's local view; use local scales too.
-        (119.0 + sample(75.0) * 26.0 + sample(1_000.0) * 15.0
-             + sample(9_000.0) * 10.0 + sample(45_000.0) * 2.5)
-            .round().clamp(2.0, 250.0) as i32
+        let mut h=76.0+island*(64.0+noise*12.0
+            +3.0*(x/26.0).sin()*(y/31.0).cos());
+
+        // Basin above sea level: the lake has a level surface at +126m.
+        let lake=Self::lake_distance(x,y);
+        if lake<86.0 {
+            let bed=111.0+15.0*(lake/76.0).powi(2);
+            let blend=((86.0-lake)/12.0).clamp(0.0,1.0);
+            h=h*(1.0-blend)+h.min(bed)*blend;
+        }
+        // Winding channel with sloping bed; broad banks are dry and only
+        // its central 9m are initially inundated.
+        if let Some((distance,surface))=Self::river(x,y) {
+            if distance<19.0 {
+                let bed=surface-3.0+0.1*(x/12.0).sin();
+                let blend=((19.0-distance)/10.0).clamp(0.0,1.0);
+                h=h*(1.0-blend)+h.min(bed)*blend;
+            }
+        }
+        // Small dry hummocks and shallow wet pockets in a low marsh basin.
+        let swamp=Self::swamp_distance(x,y);
+        if swamp<1.15 {
+            let bed=113.0+3.5*(x/12.0).sin()*(y/9.0).cos();
+            let blend=((1.15-swamp)/0.22).clamp(0.0,1.0);
+            h=h*(1.0-blend)+h.min(bed)*blend;
+        }
+        h.round().clamp(2.0,250.0) as i32
     }
 
     pub fn block(&self, x: i32, y: i32, z: i32) -> Block {
@@ -111,6 +172,44 @@ mod tests {
     fn starting_area_is_dry() {
         let t = Terrain::new();
         assert!(t.height(WORLD_SIZE / 2, WORLD_SIZE / 2) > SEA_LEVEL + 2);
+    }
+    #[test]
+    fn island_has_ocean_on_all_seams_and_dry_center() {
+        let t=Terrain::new();
+        let m=WORLD_SIZE/2;
+        assert!(t.height(m,m)>SEA_LEVEL+3);
+        for &(x,y) in &[(0,m),(WORLD_SIZE-1,m),(m,0),(m,WORLD_SIZE-1),(0,0)] {
+            assert!(t.height(x,y)<SEA_LEVEL,"seam must be ocean at {x},{y}");
+            assert_eq!(t.initial_water_surface(x,y),SEA_LEVEL);
+        }
+    }
+    #[test]
+    fn lake_is_elevated_and_river_descends_to_ocean() {
+        let t=Terrain::new();
+        let m=WORLD_SIZE/2;
+        let lake=(m-115,m+125);
+        assert!(t.height(lake.0,lake.1)<120);
+        assert_eq!(t.initial_water_surface(lake.0,lake.1),126);
+        assert_eq!(t.block(lake.0,lake.1,125),Block::Water);
+        assert_eq!(t.block(lake.0,lake.1,127),Block::Air);
+        let river_a=(m-40,m+95);
+        let river_b=(m+250,m-19);
+        assert!(t.initial_water_surface(river_a.0,river_a.1)
+            > t.initial_water_surface(river_b.0,river_b.1));
+    }
+    #[test]
+    fn swamp_has_shallow_pools_and_dry_hummocks() {
+        let t=Terrain::new();
+        let m=WORLD_SIZE/2;
+        let mut wet=0;
+        let mut dry=0;
+        for dy in -25..=25 {
+            for dx in -40..=40 {
+                let x=m+115+dx;let y=m-125+dy;
+                if t.height(x,y)<115 {wet+=1;} else {dry+=1;}
+            }
+        }
+        assert!(wet>100 && dry>100,"marsh should mix water and dry hummocks");
     }
     #[test]
     fn edits_wrap_and_override() {
