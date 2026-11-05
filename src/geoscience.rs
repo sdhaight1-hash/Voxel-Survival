@@ -83,7 +83,7 @@ pub fn tectonics(x: i32, y: i32) -> TectonicSample {
 /// A torus cannot have conventional poles. This periodic *virtual* latitude
 /// produces repeated climate belts with no seam; it is not spherical geometry.
 pub fn virtual_latitude_rad(y: i32) -> f64 {
-    ((wrap(y) as f64 / WORLD_SIZE as f64) * TAU).sin().asin()
+    (-((wrap(y) as f64 / WORLD_SIZE as f64) * TAU).sin()).asin()
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -179,6 +179,12 @@ mod tests {
             axial_tilt_rad:23.44_f64.to_radians() };
         assert!(solar_flux_w_m2(0,0,time)>900.0);
         assert_eq!(solar_flux_w_m2(WORLD_SIZE/2,0,time),0.0);
+    }
+    #[test]
+    fn latitude_north_of_map_center_is_positive() {
+        assert!(virtual_latitude_rad(WORLD_SIZE/2+10_000)>0.0);
+        assert!(virtual_latitude_rad(WORLD_SIZE/2-10_000)<0.0);
+        assert!(virtual_latitude_rad(WORLD_SIZE/2).abs()<1e-10);
     }
     #[test]
     fn wind_belts_are_periodic() {

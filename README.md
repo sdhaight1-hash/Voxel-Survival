@@ -34,7 +34,7 @@ Debug builds also work with `cargo run`, but initial terrain meshing is signific
 - **Top-center:** scrolling direction compass (N/NE/E/SE/S/SW/W/NW) with
   heading in degrees, and a *virtual* latitude/longitude readout directly
   underneath. Longitude uses the centered X axis mapped to [-180°,180°).
-  Latitude uses the existing toroidal climate bands; it is periodic and
+  The map center is the conceptual Equator/Prime Meridian crossing (0°,0°); north is positive virtual latitude, east is positive longitude. Latitude uses periodic toroidal climate bands and
   **not geographic latitude on a spherical planet**.
 - Readouts refresh approximately ten times a second to reduce texture uploads; frame time
   is the average game-frame duration, not GPU-only render duration.
