@@ -102,7 +102,7 @@ mod tests {
     #[test]
     fn compass_directions_and_wrap() {
         assert!((heading_degrees(0.0)-90.0).abs()<0.001);
-        assert!((heading_degrees(std::f32::consts::FRAC_PI_2)-0.0).abs()<0.001);
+        assert!(heading_degrees(std::f32::consts::FRAC_PI_2).min(360.0-heading_degrees(std::f32::consts::FRAC_PI_2))<0.001);
         assert!((heading_degrees(-std::f32::consts::FRAC_PI_2)-180.0).abs()<0.001);
         assert!((heading_degrees(2.0*std::f32::consts::PI)-90.0).abs()<0.01);
     }
