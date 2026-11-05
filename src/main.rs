@@ -678,7 +678,12 @@ impl Game {
                 +self.atmosphere.water_delta_kg().round() as i64,
             self.atmosphere.relative_humidity(sample.0,sample.1),
             self.atmosphere.cells[atmosphere::Atmosphere::cell_index(sample.0,sample.1)].temperature_c,
-            self.atmosphere.rain_delivered_liters,self.atmosphere.rain_unmet_liters);
+            self.atmosphere.rain_delivered_liters,self.atmosphere.rain_unmet_liters,
+            (self.atmosphere.time_seconds/(10.0*86_400.0)).floor() as usize%12,
+            self.atmosphere.rain_gauge_mm(
+                self.player.pos.x.floor() as i32,
+                self.player.pos.y.floor() as i32,
+                (self.atmosphere.time_seconds/(10.0*86_400.0)).floor() as usize%12));
         self.queue.write_texture(
             wgpu::ImageCopyTexture {
                 texture:&self.hud_texture,mip_level:0,
