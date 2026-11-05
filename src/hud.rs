@@ -4,7 +4,7 @@ use font8x8::{BASIC_FONTS, UnicodeFonts};
 use std::f64::consts::{PI, TAU};
 use crate::terrain::WORLD_SIZE;
 
-pub const WIDTH: u32 = 736;
+pub const WIDTH: u32 = 768;
 pub const HEIGHT: u32 = 92;
 const COMPASS_W: i32 = 416;
 const INFO_X: i32 = 416;
