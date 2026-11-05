@@ -62,14 +62,13 @@ fn block(t: &Terrain, x:i32, y:i32, z:i32, height:i32) -> Block {
     if let Some(&b)=t.edits.get(&cell) {
         if b.solid() {return b;}
     }
-    if let Some(&volume)=t.water.amounts.get(&cell) {
-        return if volume>0 {Block::Water} else {Block::Air};
-    }
+    // Rendering reads the authoritative finite liquid inventory, not a
+    // second copy of the implicit ocean/lake initialization rule.
+    if t.water_liters(x,y,z)>0 {return Block::Water;}
     // Excavated air starts dry regardless of elevation.
     if t.edits.contains_key(&cell) {return Block::Air;}
-    if z>height {
-        if z<t.initial_water_surface(x,y) {Block::Water} else {Block::Air}
-    } else if z==height {
+    if z>height {Block::Air}
+    else if z==height {
         if height<SEA_LEVEL {Block::Dirt} else {Block::Grass}
     } else if z>=height-3 {Block::Dirt}
     else {Block::Stone}
@@ -197,6 +196,15 @@ mod water_mesh_tests {
     use super::*;
     use crate::terrain::WORLD_SIZE;
 
+    #[test]
+    fn water_mesh_uses_authoritative_liquid_inventory_after_depletion() {
+        let mut t=Terrain::new();
+        let (x,y)=(WORLD_SIZE/2-115,WORLD_SIZE/2+125);
+        assert_eq!(block(&t,x,y,125,t.height(x,y)),Block::Water);
+        t.water_assign((x,y,125),0);
+        assert_eq!(block(&t,x,y,125,t.height(x,y)),Block::Air);
+        assert_eq!(t.water_liters(x,y,125),0);
+    }
     #[test]
     fn elevated_lake_mesh_reaches_absolute_initial_water_surface() {
         let t=Terrain::new();
