@@ -21,6 +21,21 @@ impl Vertex {
         }
     }
 }
+#[repr(C)]
+#[derive(Clone,Copy,Pod,Zeroable)]
+pub struct ChunkOffset {pub xy:[f32;2]}
+impl ChunkOffset {
+    pub fn layout<'a>() -> wgpu::VertexBufferLayout<'a> {
+        wgpu::VertexBufferLayout {
+            array_stride:std::mem::size_of::<Self>() as wgpu::BufferAddress,
+            step_mode:wgpu::VertexStepMode::Instance,
+            attributes:&[wgpu::VertexAttribute {
+                offset:0,shader_location:3,format:wgpu::VertexFormat::Float32x2,
+            }],
+        }
+    }
+}
+
 pub struct Mesh {
     pub vertices: Vec<Vertex>,
     pub indices: Vec<u32>,
@@ -41,18 +56,23 @@ const CORNERS: [[[f32;3];4];6] = [
 ];
 const UV: [[f32;2];4] = [[0.,1.],[1.,1.],[1.,0.],[0.,0.]];
 
-fn block(t: &Terrain, x: i32, y: i32, z: i32, height: i32) -> Block {
-    if !(0..WORLD_HEIGHT).contains(&z) { return Block::Air; }
-    if let Some(&b) = t.edits.get(&(wrap(x), wrap(y), z)) { return b; }
-    if z > height {
-        if z <= SEA_LEVEL { Block::Water } else { Block::Air }
-    } else if z == height {
-        if height < SEA_LEVEL { Block::Dirt } else { Block::Grass }
-    } else if z >= height - 3 {
-        Block::Dirt
-    } else {
-        Block::Stone
+fn block(t: &Terrain, x:i32, y:i32, z:i32, height:i32) -> Block {
+    if !(0..WORLD_HEIGHT).contains(&z) {return Block::Air;}
+    let cell=(wrap(x),wrap(y),z);
+    if let Some(&b)=t.edits.get(&cell) {
+        if b.solid() {return b;}
     }
+    if let Some(&volume)=t.water.amounts.get(&cell) {
+        return if volume>0 {Block::Water} else {Block::Air};
+    }
+    // Excavated air starts dry regardless of elevation.
+    if t.edits.contains_key(&cell) {return Block::Air;}
+    if z>height {
+        if z<=SEA_LEVEL {Block::Water} else {Block::Air}
+    } else if z==height {
+        if height<SEA_LEVEL {Block::Dirt} else {Block::Grass}
+    } else if z>=height-3 {Block::Dirt}
+    else {Block::Stone}
 }
 
 fn tile(b: Block, face: usize) -> u32 {
@@ -95,6 +115,13 @@ pub fn build(t: &Terrain, center_x: i32, center_y: i32, radius: i32) -> Mesh {
                     minimum_edit_z = minimum_edit_z.min(ez);
                 }
             }
+            for (&(ex,ey,ez), _) in &t.water.amounts {
+                if (0..CHUNK_SIZE).contains(&delta(ex,base_x))
+                    && (0..CHUNK_SIZE).contains(&delta(ey,base_y)) {
+                    max_height=max_height.max(ez);
+                    minimum_edit_z=minimum_edit_z.min(ez);
+                }
+            }
             for ly in 0..32 {
                 for lx in 0..32 {
                     let x = base_x + lx;
@@ -115,9 +142,12 @@ pub fn build(t: &Terrain, center_x: i32, center_y: i32, radius: i32) -> Mesh {
                             let nh = heights[(ly + dy + 1) as usize][(lx + dx + 1) as usize];
                             let neighbor = block(t, x + dx, y + dy, z + dz, nh);
                             let visible = if b == Block::Water {
-                                // Only water's exposed upper surface: sides and bottoms
-                                // are not useful until transparent water volumes exist.
-                                face == 4 && neighbor == Block::Air
+                                // Render surface + exposed sides of partial liquid cells.
+                                (face == 4 && neighbor == Block::Air)
+                                    || (face < 4 && (neighbor == Block::Air
+                                        || (neighbor == Block::Water
+                                           && t.water_liters(x,y,z)
+                                                > t.water_liters(x+dx,y+dy,z))))
                             } else {
                                 neighbor == Block::Air || neighbor == Block::Water
                             };
@@ -127,8 +157,11 @@ pub fn build(t: &Terrain, center_x: i32, center_y: i32, radius: i32) -> Mesh {
                             let py = delta(y, origin_y) as f32;
                             for i in 0..4 {
                                 let c = CORNERS[face][i];
+                                let level = if b == Block::Water {
+                                    t.water_liters(x,y,z) as f32 / 1000.0
+                                } else {1.0};
                                 result.vertices.push(Vertex {
-                                    pos: [px + c[0], py + c[1], z as f32 + c[2]],
+                                    pos: [px + c[0], py + c[1], z as f32 + c[2] * level],
                                     uv: UV[i],
                                     tile: tile(b, face),
                                 });

@@ -25,21 +25,49 @@ Debug builds also work with `cargo run`, but initial terrain meshing is signific
 | 1 / 2 / 3 | Select dirt / grass / stone |
 | Escape | Release mouse |
 
-The first click captures the mouse; subsequent clicks edit blocks. Maximum reach is 6 meters.
+The first click captures the mouse; subsequent clicks edit blocks. Maximum reach is 6 meters. Placement into a water-filled voxel is currently disabled rather than silently deleting finite water.
 
 ## World rules
 
 - **Horizontal torus:** X and Y wrap, including procedural noise, block edits, collision, ray picking, and mesh coordinates.
 - **World extent:** 1,024,000 × 1,024,000 meters (**1024 km × 1024 km**).
 - **Voxel:** exactly 1 meter.
-- **Logical chunk:** 32 × 32 × 32 voxels; 32,000 × 32,000 horizontal chunk coordinates, eight vertical sections (Z=0..255). The first prototype meshes nearby 32×32 columns in one combined GPU buffer.
-- **Vertical:** Z=0..255 (256 blocks); **sea level Z=110**, with alpha-blended water-surface tiles.
+- **Logical chunk:** 32 × 32 × 32 voxels; 32,000 × 32,000 horizontal chunk coordinates, eight vertical sections (Z=0..255). The prototype caches nearby 32×32 chunk-column meshes individually on the GPU (logical 32³ storage is a later milestone).
+- **Vertical:** Z=0..255 (256 blocks); **sea level Z=110**, with alpha-blended finite-volume surface and side tiles.
 - **Player:** collision body 1.3 meters high, 0.56 meters wide; first-person camera 1.18 meters above feet.
-- **Terrain:** seamless multi-scale periodic 4D noise with local hill detail; dry-land spawn search; stone core, dirt subsurface, green grass on land, water below sea level.
-- **Streaming:** only nearby terrain within a seven-by-seven chunk-column window is generated and meshed. Edits are kept in memory for the session.
+- **Terrain:** seamless multi-scale periodic 4D noise; dry-land spawn search; stone, dirt, grass; finite initialized ocean water. Regional plate-boundary, wind-belt, rain-shadow and solar-energy models are available but geological and climate evolution are not yet coupled into terrain generation.
+- **Streaming:** seven-by-seven nearby chunk-column window; existing GPU meshes are retained during movement and only newly entered or locally modified columns are remeshed. Edits and water overrides remain in memory for the session.
+
+## Simulation progress
+
+- Player collision: fixed 120 Hz simulation, 0.56×0.56×1.3 m AABB,
+  ground-contact probe, no idle bobbing, 1m jump traversal.
+- Finite water: 0–1,000 L per voxel, localized gravity-first and horizontal
+  equalizing transfers, torus wrapping, sparse overrides to a finite initial
+  ocean. Mining below sea level creates **dry space** until water flows in.
+- Atmosphere-water mass bookkeeping: precipitation withdraws from a finite
+  atmosphere reservoir, evaporation returns water to it. These are primitive
+  transfers, **not yet an automatically running weather simulation**.
+- Regional geophysics: deterministic toroidal plate-boundary uplift proxy,
+  virtual latitude, prevailing east/west wind belts, simplified mountain
+  rain-shadow function, solar-angle/seasonal insolation, albedo/heat-capacity.
+- The sun currently drives a 20-minute day/night sky and block-light cycle
+  and a representative local thermal cell, not a 3D atmospheric model.
+
+See [world-systems implementation plan](docs/WORLD_SYSTEMS_PLAN.md)
+for dependencies, physical invariants, the milestone roadmap and acceptance tests.
 
 ## Current limitations
 
-This is a first playable technical slice, **not a finished Vintage Story clone**. There is no save/load, inventory, full HUD, advanced lighting, volumetric water, caves, crafting, entities, or network play yet. The center crosshair is implemented. Water currently draws only its transparent top surface; there is no underwater shading. Texture designs are original procedural art. Mesh rebuilding is synchronous, including after block edits; long pauses are possible on slower CPUs. Edits persist only until exit. Larger-scale world streaming should use a persistent chunk cache, background generation, greedy meshing, and region save files.
+This is a playable **technical prototype**, not a finished survival game.
+There are no persistent saves, caves, inventory, groundwater, actual moving
+tectonic plates, atmospheric moisture advection, realistic pressure-driven
+water flow, or full climate/weather yet. Initial terrain is still procedural
+noise; the tectonic uplift model is a tested regional primitive not yet used
+to build the height map. Water visuals are basic and no underwater shading
+exists. First-time chunk meshing and edits are still synchronous, although
+already cached chunks are reused across boundary crossings. Stable Rust
+checks and unit tests run in CI; a real Windows Vulkan playtest is required.
 
-Run `cargo test` to verify wrapping, local terrain relief, safe midpoint spawn, periodic height generation, edit coordinates, and WGSL shader validity.
+Run `cargo test` for world-wrap, terrain, collision/grounding, finite
+water conservation, regional climate, solar energy and WGSL shader tests.

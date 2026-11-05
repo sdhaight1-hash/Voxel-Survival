@@ -1,7 +1,9 @@
 mod mesh;
 mod terrain;
+mod hydrology;
+mod geoscience;
 
-use std::{collections::HashSet, sync::Arc, time::Instant};
+use std::{collections::{HashMap,HashSet}, sync::Arc, time::Instant};
 use bytemuck::{Pod, Zeroable};
 use glam::{Mat4, Vec3};
 use terrain::{Block, Terrain, WORLD_SIZE, WORLD_HEIGHT};
@@ -27,6 +29,7 @@ const MOUSE_SENSITIVITY: f32 = 0.002;
 struct CameraUniform {
     view_proj: [[f32; 4]; 4],
     viewport: [f32; 4],
+    sunlight: [f32; 4],
 }
 
 struct Player {
@@ -43,14 +46,23 @@ impl Player {
     fn eye(&self) -> Vec3 { self.pos + Vec3::Z * EYE_HEIGHT }
 }
 
+// Player is a continuous AABB; voxel coordinates are integer unit cubes.
+// The epsilon avoids treating a mere face-to-face touch as penetration.
+const COLLISION_EPS: f32 = 0.0001;
+const GROUND_PROBE: f32 = 0.025;
+const PHYSICS_DT: f32 = 1.0 / 120.0;
+
 fn collides(t: &Terrain, pos: Vec3) -> bool {
-    for dx in [-PLAYER_RADIUS, PLAYER_RADIUS] {
-        for dy in [-PLAYER_RADIUS, PLAYER_RADIUS] {
-            for dz in [0.04, 0.65, PLAYER_HEIGHT - 0.02] {
-                let p = pos + Vec3::new(dx,dy,dz);
-                if t.block(p.x.floor() as i32, p.y.floor() as i32, p.z.floor() as i32).solid() {
-                    return true;
-                }
+    let min_x = (pos.x - PLAYER_RADIUS + COLLISION_EPS).floor() as i32;
+    let max_x = (pos.x + PLAYER_RADIUS - COLLISION_EPS).floor() as i32;
+    let min_y = (pos.y - PLAYER_RADIUS + COLLISION_EPS).floor() as i32;
+    let max_y = (pos.y + PLAYER_RADIUS - COLLISION_EPS).floor() as i32;
+    let min_z = (pos.z + COLLISION_EPS).floor() as i32;
+    let max_z = (pos.z + PLAYER_HEIGHT - COLLISION_EPS).floor() as i32;
+    for z in min_z..=max_z {
+        for y in min_y..=max_y {
+            for x in min_x..=max_x {
+                if t.block(x, y, z).solid() { return true; }
             }
         }
     }
@@ -58,56 +70,73 @@ fn collides(t: &Terrain, pos: Vec3) -> bool {
 }
 fn wrap_pos(v: f32) -> f32 { v.rem_euclid(WORLD_SIZE as f32) }
 
-fn update_player(p: &mut Player, t: &Terrain, keys: &HashSet<KeyCode>, dt: f32) {
+fn support_below(t: &Terrain, p: &Player) -> bool {
+    collides(t, p.pos - Vec3::Z * GROUND_PROBE)
+}
+fn horizontal_direction(p: &Player, keys: &HashSet<KeyCode>) -> Vec3 {
     let forward = Vec3::new(p.yaw.cos(), p.yaw.sin(), 0.0);
-    // In our Z-up coordinates, positive yaw turns the camera counterclockwise.
-    // Screen-right is the clockwise perpendicular to horizontal forward.
     let right = Vec3::new(p.yaw.sin(), -p.yaw.cos(), 0.0);
-    let mut movement = Vec3::ZERO;
-    if keys.contains(&KeyCode::KeyW) { movement += forward; }
-    if keys.contains(&KeyCode::KeyS) { movement -= forward; }
-    if keys.contains(&KeyCode::KeyD) { movement += right; }
-    if keys.contains(&KeyCode::KeyA) { movement -= right; }
-    if movement.length_squared() > 0.0 { movement = movement.normalize() * 5.0 * dt; }
+    let mut v = Vec3::ZERO;
+    if keys.contains(&KeyCode::KeyW) { v += forward; }
+    if keys.contains(&KeyCode::KeyS) { v -= forward; }
+    if keys.contains(&KeyCode::KeyD) { v += right; }
+    if keys.contains(&KeyCode::KeyA) { v -= right; }
+    if v.length_squared() > 0.0 { v.normalize() } else { v }
+}
 
-    // Resolve jumping before horizontal motion, so a rising player can climb
-    // the face of a one-meter block instead of being blocked for that frame.
+// Called at a fixed 120 Hz, never with the display frame duration.
+fn update_player(p: &mut Player, t: &Terrain, keys: &HashSet<KeyCode>, dt: f32) {
+    let supported = support_below(t, p);
+    if p.velocity_z <= 0.0 && supported {
+        p.grounded = true;
+        p.velocity_z = 0.0;
+    } else if p.grounded && !supported {
+        p.grounded = false;
+    }
+
     if p.grounded && keys.contains(&KeyCode::Space) {
         p.velocity_z = JUMP_SPEED;
         p.grounded = false;
     }
-
-    // Substep vertical movement to avoid skipping thin obstacles at high fall speed.
-    let previous_velocity = p.velocity_z;
-    p.velocity_z = (p.velocity_z - GRAVITY * dt).max(-35.0);
-    let displacement = (previous_velocity + p.velocity_z) * 0.5 * dt;
-    let steps = (displacement.abs() / 0.10).ceil().max(1.0) as usize;
-    for _ in 0..steps {
-        let candidate = p.pos + Vec3::Z * (displacement / steps as f32);
-        if collides(t, candidate) {
-            if displacement < 0.0 {
-                // The collision occurred while crossing the top of a block.
-                p.pos.z = candidate.z.floor() + 1.0;
-                p.grounded = true;
+    if !p.grounded {
+        let old_velocity = p.velocity_z;
+        p.velocity_z = (p.velocity_z - GRAVITY * dt).max(-35.0);
+        let travel = (old_velocity + p.velocity_z) * 0.5 * dt;
+        let steps = (travel.abs() / 0.06).ceil().max(1.0) as usize;
+        for _ in 0..steps {
+            let candidate = p.pos + Vec3::Z * (travel / steps as f32);
+            if collides(t, candidate) {
+                // Small substeps keep the player at their last nonpenetrating
+                // position; no floor(z)+1 teleport / forced camera movement.
+                if travel < 0.0 {
+                    // The collided surface is the highest occupied block under
+                    // the feet. Snap only if it is within this small travel step.
+                    let top = candidate.z.floor() + 1.0;
+                    if top >= p.pos.z - 0.07 && top <= p.pos.z + 0.07 {
+                        p.pos.z = top;
+                    }
+                    p.grounded = true;
+                }
+                p.velocity_z = 0.0;
+                break;
             }
-            p.velocity_z = 0.0;
-            break;
+            p.pos = candidate;
         }
-        p.pos = candidate;
-        p.grounded = false;
     }
 
-    // Only collide horizontally. The previous full-meter auto-step made
-    // characters teleport up cliffs instead of having to jump them.
-    let steps = (movement.length() / 0.10).ceil().max(1.0) as usize;
+    let travel = horizontal_direction(p, keys) * 5.0 * dt;
+    let steps = (travel.length() / 0.08).ceil().max(1.0) as usize;
     for _ in 0..steps {
-        let step = movement / steps as f32;
+        let step = travel / steps as f32;
+        // Independent axes permit sliding along walls.
         let x = Vec3::new(wrap_pos(p.pos.x + step.x), p.pos.y, p.pos.z);
         if !collides(t, x) { p.pos = x; }
         let y = Vec3::new(p.pos.x, wrap_pos(p.pos.y + step.y), p.pos.z);
         if !collides(t, y) { p.pos = y; }
     }
-    // Prevent leaving the vertical world bounds.
+    // A ledge can be crossed during horizontal movement; it is no longer
+    // supported, but gravity starts on the next fixed simulation step.
+    if p.grounded && !support_below(t, p) { p.grounded = false; }
     p.pos.z = p.pos.z.clamp(0.0, (WORLD_HEIGHT - 2) as f32);
 }
 
@@ -157,6 +186,14 @@ fn texture_pixels() -> Vec<u8> {
     pixels
 }
 
+struct ChunkGpu {
+    origin: (i32,i32),
+    vertices: wgpu::Buffer,
+    indices: wgpu::Buffer,
+    opaque_count: u32,
+    count: u32,
+}
+
 struct Game {
     surface: wgpu::Surface<'static>,
     device: wgpu::Device,
@@ -169,10 +206,8 @@ struct Game {
     camera_buffer: wgpu::Buffer,
     camera_bind: wgpu::BindGroup,
     texture_bind: wgpu::BindGroup,
-    vertex_buffer: wgpu::Buffer,
-    index_buffer: wgpu::Buffer,
-    index_count: u32,
-    opaque_index_count: u32,
+    chunks: Vec<ChunkGpu>,
+    chunk_offsets: wgpu::Buffer,
     mesh_origin: (i32, i32),
     terrain: Terrain,
     player: Player,
@@ -180,6 +215,11 @@ struct Game {
     keys: HashSet<KeyCode>,
     mouse_captured: bool,
     last_frame: Instant,
+    physics_accumulator: f32,
+    water_accumulator: f32,
+    world_time_seconds: f64,
+    surface_temperature: geoscience::ThermalCell,
+    sunlight: f32,
 }
 
 fn depth_view(device: &wgpu::Device, size: PhysicalSize<u32>) -> wgpu::TextureView {
@@ -224,6 +264,7 @@ impl Game {
             contents: bytemuck::bytes_of(&CameraUniform {
                 view_proj: Mat4::IDENTITY.to_cols_array_2d(),
                 viewport: [size.width as f32, size.height as f32, 0.0, 0.0],
+                sunlight: [1.0,0.0,0.0,0.0],
             }),
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
         });
@@ -291,7 +332,7 @@ impl Game {
         let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
             label:Some("voxel pipeline"), layout:Some(&layout),
             vertex:wgpu::VertexState {
-                module:&shader, entry_point:"vs_main", buffers:&[mesh::Vertex::layout()],
+                module:&shader, entry_point:"vs_main", buffers:&[mesh::Vertex::layout(),mesh::ChunkOffset::layout()],
                 compilation_options:Default::default(),
             },
             fragment:Some(wgpu::FragmentState {
@@ -311,7 +352,7 @@ impl Game {
         let water_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
             label:Some("blended water"), layout:Some(&layout),
             vertex:wgpu::VertexState {
-                module:&shader, entry_point:"vs_main", buffers:&[mesh::Vertex::layout()],
+                module:&shader, entry_point:"vs_main", buffers:&[mesh::Vertex::layout(),mesh::ChunkOffset::layout()],
                 compilation_options:Default::default(),
             },
             fragment:Some(wgpu::FragmentState {
@@ -385,40 +426,90 @@ impl Game {
             pos:Vec3::new(spawn.0 as f32,spawn.1 as f32,spawn_z),
             velocity_z:0.0, yaw:0.3,pitch:-0.2,grounded:false,
         };
-        let placeholder = device.create_buffer(&wgpu::BufferDescriptor {
-            label:Some("placeholder"),size:4,usage:wgpu::BufferUsages::VERTEX|wgpu::BufferUsages::INDEX,
-            mapped_at_creation:false,
-        });
         let depth = depth_view(&device,size);
-        let index_placeholder = device.create_buffer(&wgpu::BufferDescriptor {
-            label:Some("index placeholder"),size:4,usage:wgpu::BufferUsages::INDEX,mapped_at_creation:false,
+        let chunk_offsets = device.create_buffer(&wgpu::BufferDescriptor {
+            label:Some("chunk offset placeholder"),size:8,
+            usage:wgpu::BufferUsages::VERTEX,mapped_at_creation:false,
         });
         let mut game = Self {
             surface,device,queue,config,pipeline,water_pipeline,crosshair_pipeline,
             depth,
             camera_buffer,camera_bind,texture_bind,
-            vertex_buffer:placeholder,index_buffer:index_placeholder,index_count:0,
-            opaque_index_count:0,
+            chunks:Vec::new(),chunk_offsets,
             mesh_origin:(0,0),terrain,player,selected:Block::Dirt,
-            keys:HashSet::new(),mouse_captured:false,last_frame:Instant::now(),
+            keys:HashSet::new(),mouse_captured:false,last_frame:Instant::now(),physics_accumulator:0.0,water_accumulator:0.0,
+            world_time_seconds:0.0,
+            surface_temperature:geoscience::ThermalCell {temperature_c:15.0},
+            sunlight:1.0,
         };
         game.rebuild();
         game
     }
 
+    fn gpu_chunk(&self,x:i32,y:i32) -> ChunkGpu {
+        let mesh=mesh::build(&self.terrain,x,y,0);
+        ChunkGpu {
+            origin:(terrain::wrap(x),terrain::wrap(y)),
+            opaque_count:mesh.water_index_start,
+            count:mesh.indices.len() as u32,
+            vertices:self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label:Some("chunk vertices"),
+                contents:bytemuck::cast_slice(&mesh.vertices),
+                usage:wgpu::BufferUsages::VERTEX,
+            }),
+            indices:self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label:Some("chunk indices"),
+                contents:bytemuck::cast_slice(&mesh.indices),
+                usage:wgpu::BufferUsages::INDEX,
+            }),
+        }
+    }
+
+    // Keeps already generated chunks and builds only the new edge when crossing
+    // a 32m chunk boundary (7 instead of 49 chunk columns in the common case).
     fn rebuild(&mut self) {
-        let m = mesh::build(&self.terrain, self.player.pos.x as i32, self.player.pos.y as i32, VIEW_RADIUS);
-        self.mesh_origin = (m.origin_x,m.origin_y);
-        self.index_count = m.indices.len() as u32;
-        self.opaque_index_count = m.water_index_start;
-        self.vertex_buffer = self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-            label:Some("visible voxel vertices"),contents:bytemuck::cast_slice(&m.vertices),
+        let cx=(self.player.pos.x.floor() as i32).div_euclid(32)*32;
+        let cy=(self.player.pos.y.floor() as i32).div_euclid(32)*32;
+        self.mesh_origin=(cx,cy);
+        let mut previous:HashMap<(i32,i32),ChunkGpu>=
+            std::mem::take(&mut self.chunks).into_iter()
+                .map(|chunk|(chunk.origin,chunk)).collect();
+        for dy in -VIEW_RADIUS..=VIEW_RADIUS {
+            for dx in -VIEW_RADIUS..=VIEW_RADIUS {
+                let origin=(terrain::wrap(cx+dx*32),terrain::wrap(cy+dy*32));
+                let chunk=match previous.remove(&origin) {
+                    Some(chunk)=>chunk,
+                    None=>self.gpu_chunk(origin.0,origin.1),
+                };
+                self.chunks.push(chunk);
+            }
+        }
+        let offsets:Vec<mesh::ChunkOffset>=self.chunks.iter().map(|chunk| {
+            mesh::ChunkOffset {xy:[
+                terrain::delta(chunk.origin.0,cx) as f32,
+                terrain::delta(chunk.origin.1,cy) as f32,
+            ]}
+        }).collect();
+        self.chunk_offsets=self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label:Some("visible chunk offsets"),
+            contents:bytemuck::cast_slice(&offsets),
             usage:wgpu::BufferUsages::VERTEX,
         });
-        self.index_buffer = self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-            label:Some("visible voxel indices"),contents:bytemuck::cast_slice(&m.indices),
-            usage:wgpu::BufferUsages::INDEX,
-        });
+    }
+
+    // A changed voxel also affects visible faces across the adjacent border.
+    fn refresh_edited_chunks(&mut self, changed:&HashSet<(i32,i32,i32)>) {
+        let affected:Vec<(usize,i32,i32)>=self.chunks.iter().enumerate()
+            .filter(|(_,chunk)| changed.iter().any(|&(x,y,_)| {
+                let dx=terrain::delta(x,chunk.origin.0);
+                let dy=terrain::delta(y,chunk.origin.1);
+                (-1..=32).contains(&dx) && (-1..=32).contains(&dy)
+            }))
+            .map(|(index,chunk)|(index,chunk.origin.0,chunk.origin.1))
+            .collect();
+        for (index,x,y) in affected {
+            self.chunks[index]=self.gpu_chunk(x,y);
+        }
     }
     fn resize(&mut self, size:PhysicalSize<u32>) {
         if size.width == 0 || size.height == 0 { return; }
@@ -429,9 +520,39 @@ impl Game {
     }
     fn update(&mut self) {
         let now = Instant::now();
-        let dt = now.duration_since(self.last_frame).as_secs_f32().min(0.05);
+        let frame_dt = now.duration_since(self.last_frame).as_secs_f32().min(0.1);
         self.last_frame = now;
-        update_player(&mut self.player,&self.terrain,&self.keys,dt);
+        self.world_time_seconds += frame_dt as f64;
+        // Twenty real minutes per simulated day, 120 days per year.
+        // The solar model uses continuous energy in W/m²; thermal integration
+        // receives matching simulated seconds, not render-frame counts.
+        let solar_time = geoscience::SolarTime {
+            day_fraction:(self.world_time_seconds/1200.0).fract(),
+            year_fraction:(0.25+self.world_time_seconds/(1200.0*120.0)).fract(),
+            ..Default::default()
+        };
+        let solar = geoscience::solar_flux_w_m2(
+            self.player.pos.x as i32,self.player.pos.y as i32,solar_time,
+        );
+        self.sunlight=(solar/950.0).clamp(0.0,1.0) as f32;
+        self.surface_temperature.advance(solar,geoscience::Surface::Grass,
+            300.0,0.0,frame_dt as f64*72.0);
+        self.physics_accumulator += frame_dt;
+        let mut ticks = 0;
+        while self.physics_accumulator >= PHYSICS_DT && ticks < 12 {
+            update_player(&mut self.player, &self.terrain, &self.keys, PHYSICS_DT);
+            self.physics_accumulator -= PHYSICS_DT;
+            ticks += 1;
+        }
+        // Fluid runs at a lower fixed rate than player physics. Only active
+        // cells are visited; calm ocean cells do not update every tick.
+        self.water_accumulator += frame_dt;
+        if self.water_accumulator >= 0.2 {
+            self.water_accumulator = 0.0;
+            self.terrain.step_water(4096);
+            let dirty=self.terrain.take_water_dirty();
+            if !dirty.is_empty() {self.refresh_edited_chunks(&dirty);}
+        }
         let cx = (self.player.pos.x as i32).div_euclid(32) * 32;
         let cy = (self.player.pos.y as i32).div_euclid(32) * 32;
         if (cx,cy) != self.mesh_origin { self.rebuild(); }
@@ -445,6 +566,7 @@ impl Game {
         let uniform = CameraUniform {
             view_proj:(proj*view).to_cols_array_2d(),
             viewport:[self.config.width as f32,self.config.height as f32,0.0,0.0],
+            sunlight:[self.sunlight,0.0,0.0,0.0],
         };
         self.queue.write_buffer(&self.camera_buffer,0,bytemuck::bytes_of(&uniform));
     }
@@ -454,7 +576,9 @@ impl Game {
                 MouseButton::Left => self.terrain.set(hit.0,hit.1,hit.2,Block::Air),
                 MouseButton::Right => {
                     let old = self.terrain.block(empty.0,empty.1,empty.2);
-                    if old == Block::Air || old == Block::Water {
+                    // Until displacement is implemented, never delete finite
+                    // water volume when placing a block.
+                    if old == Block::Air {
                         self.terrain.set(empty.0,empty.1,empty.2,self.selected);
                         if collides(&self.terrain,self.player.pos) {
                             self.terrain.set(empty.0,empty.1,empty.2,old);
@@ -463,12 +587,14 @@ impl Game {
                 }
                 _ => return,
             }
-            self.rebuild();
+            let changed=HashSet::from([hit,empty]);
+            self.refresh_edited_chunks(&changed);
         }
     }
     fn render(&mut self) -> Result<(),wgpu::SurfaceError> {
         let frame = self.surface.get_current_texture()?;
         let view = frame.texture.create_view(&Default::default());
+        let sun=self.sunlight as f64;
         let mut encoder = self.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {label:Some("frame")});
         {
             let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
@@ -476,7 +602,7 @@ impl Game {
                 color_attachments:&[Some(wgpu::RenderPassColorAttachment {
                     view:&view,resolve_target:None,
                     ops:wgpu::Operations {
-                        load:wgpu::LoadOp::Clear(wgpu::Color {r:0.49,g:0.67,b:0.79,a:1.0}),
+                        load:wgpu::LoadOp::Clear(wgpu::Color {r:0.025+0.465*sun,g:0.035+0.635*sun,b:0.065+0.725*sun,a:1.0}),
                         store:wgpu::StoreOp::Store,
                     },
                 })],
@@ -491,11 +617,23 @@ impl Game {
             pass.set_pipeline(&self.pipeline);
             pass.set_bind_group(0,&self.camera_bind,&[]);
             pass.set_bind_group(1,&self.texture_bind,&[]);
-            pass.set_vertex_buffer(0,self.vertex_buffer.slice(..));
-            pass.set_index_buffer(self.index_buffer.slice(..),wgpu::IndexFormat::Uint32);
-            pass.draw_indexed(0..self.opaque_index_count,0,0..1);
+            for (i,chunk) in self.chunks.iter().enumerate() {
+                if chunk.opaque_count==0 {continue;}
+                pass.set_vertex_buffer(0,chunk.vertices.slice(..));
+                let start=(i*8) as u64;
+                pass.set_vertex_buffer(1,self.chunk_offsets.slice(start..start+8));
+                pass.set_index_buffer(chunk.indices.slice(..),wgpu::IndexFormat::Uint32);
+                pass.draw_indexed(0..chunk.opaque_count,0,0..1);
+            }
             pass.set_pipeline(&self.water_pipeline);
-            pass.draw_indexed(self.opaque_index_count..self.index_count,0,0..1);
+            for (i,chunk) in self.chunks.iter().enumerate() {
+                if chunk.opaque_count==chunk.count {continue;}
+                pass.set_vertex_buffer(0,chunk.vertices.slice(..));
+                let start=(i*8) as u64;
+                pass.set_vertex_buffer(1,self.chunk_offsets.slice(start..start+8));
+                pass.set_index_buffer(chunk.indices.slice(..),wgpu::IndexFormat::Uint32);
+                pass.draw_indexed(chunk.opaque_count..chunk.count,0,0..1);
+            }
             pass.set_pipeline(&self.crosshair_pipeline);
             pass.set_bind_group(0,&self.camera_bind,&[]);
             pass.set_scissor_rect(
@@ -636,6 +774,53 @@ mod movement_tests {
         }
         assert!(peak > 202.15, "jump must exceed one-meter obstacle with clearance");
         assert!(p.pos.x > x as f32 + 3.3, "player should traverse the block");
+    }
+
+    #[test]
+    fn grounded_player_stays_at_exact_same_height() {
+        let mut t=Terrain::new();
+        let x=WORLD_SIZE/2;
+        let y=WORLD_SIZE/2;
+        for dx in -2..=2 {
+            for dy in -2..=2 { t.set(x+dx,y+dy,200,Block::Stone); }
+        }
+        let mut p=player(x as f32+0.5,y as f32+0.5,201.0);
+        for _ in 0..720 {
+            update_player(&mut p,&t,&HashSet::new(),PHYSICS_DT);
+            assert_eq!(p.pos.z,201.0,"stationary camera bobbed on level floor");
+            assert!(p.grounded);
+        }
+    }
+
+    #[test]
+    fn player_falls_only_after_walking_off_edge() {
+        let mut t=Terrain::new();
+        let x=WORLD_SIZE/2;
+        let y=WORLD_SIZE/2;
+        for dy in -1..=1 { t.set(x,y+dy,200,Block::Stone); }
+        let mut p=player(x as f32+0.5,y as f32+0.5,201.0);
+        for _ in 0..150 {
+            update_player(&mut p,&t,&HashSet::from([KeyCode::KeyW]),PHYSICS_DT);
+        }
+        assert!(p.pos.z<200.0,"the player did not fall off the platform");
+    }
+
+    #[test]
+    fn head_collisions_do_not_teleport_player_upwards() {
+        let mut t=Terrain::new();
+        let x=WORLD_SIZE/2;
+        let y=WORLD_SIZE/2;
+        for dx in -1..=1 {
+            for dy in -1..=1 {
+                t.set(x+dx,y+dy,200,Block::Stone);
+                t.set(x+dx,y+dy,203,Block::Stone);
+            }
+        }
+        let mut p=player(x as f32+0.5,y as f32+0.5,201.0);
+        for _ in 0..120 {
+            update_player(&mut p,&t,&HashSet::from([KeyCode::Space]),PHYSICS_DT);
+            assert!(p.pos.z<=201.71,"head entered the ceiling");
+        }
     }
 
     #[test]

@@ -1,6 +1,7 @@
 struct Camera {
     view_proj: mat4x4<f32>,
     viewport: vec4<f32>,
+    sunlight: vec4<f32>,
 };
 @group(0) @binding(0) var<uniform> camera: Camera;
 @group(1) @binding(0) var tiles: texture_2d_array<f32>;
@@ -10,6 +11,7 @@ struct VertexInput {
     @location(0) position: vec3<f32>,
     @location(1) uv: vec2<f32>,
     @location(2) tile: u32,
+    @location(3) chunk_offset: vec2<f32>,
 };
 struct VertexOutput {
     @builtin(position) clip_position: vec4<f32>,
@@ -20,7 +22,7 @@ struct VertexOutput {
 @vertex
 fn vs_main(v: VertexInput) -> VertexOutput {
     var o: VertexOutput;
-    o.clip_position = camera.view_proj * vec4<f32>(v.position, 1.0);
+    o.clip_position = camera.view_proj * vec4<f32>(v.position.xy + v.chunk_offset, v.position.z, 1.0);
     o.uv = v.uv;
     o.tile = v.tile;
     // Vertex shading is intentionally subtle; distinct top/side textures do most of the work.
@@ -30,13 +32,13 @@ fn vs_main(v: VertexInput) -> VertexOutput {
 @fragment
 fn fs_main(v: VertexOutput) -> @location(0) vec4<f32> {
     let color = textureSample(tiles, nearest_sampler, v.uv, i32(v.tile));
-    return vec4<f32>(color.rgb * v.shade, 1.0);
+    return vec4<f32>(color.rgb * v.shade * (0.22 + 0.78 * camera.sunlight.x), 1.0);
 }
 
 @fragment
 fn fs_water(v: VertexOutput) -> @location(0) vec4<f32> {
     let color = textureSample(tiles, nearest_sampler, v.uv, i32(v.tile));
-    return vec4<f32>(color.rgb, 0.58);
+    return vec4<f32>(color.rgb * (0.25 + 0.75 * camera.sunlight.x), 0.58);
 }
 
 @vertex
