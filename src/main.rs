@@ -657,9 +657,15 @@ impl Game {
         }
     }
     fn upload_hud(&self) {
+        let eye_cell=(self.player.eye().x.floor() as i32,
+            self.player.eye().y.floor() as i32,self.player.eye().z.floor() as i32);
+        let sample=target_water(&self.terrain,&self.player).unwrap_or(eye_cell);
+        let water_liters=self.terrain.water_liters(sample.0,sample.1,sample.2);
         let data=hud::rasterize(self.player.yaw,self.player.pos.x,
             self.player.pos.y,self.player.pos.z,
-            self.hud_fps,self.hud_frame_ms,self.time_scale,self.world_time_seconds);
+            self.hud_fps,self.hud_frame_ms,self.time_scale,self.world_time_seconds,
+            water_liters,self.terrain.water.active.len(),
+            self.terrain.water.surface_delta_liters,self.terrain.water.atmosphere_liters);
         self.queue.write_texture(
             wgpu::ImageCopyTexture {
                 texture:&self.hud_texture,mip_level:0,
