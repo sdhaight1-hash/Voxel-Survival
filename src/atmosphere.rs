@@ -14,6 +14,7 @@ const LAYER_HEIGHT_M:f64=2000.0;
 const AIR_MASS_KG:f64=AREA_M2*LAYER_HEIGHT_M*1.18;
 const PRESSURE_PA:f64=101_325.0;
 const MONTH_SECONDS:f64=10.0*86_400.0;
+const LATENT_HEAT_J_PER_KG:f64=2_450_000.0;
 
 #[derive(Clone,Debug)]
 struct RainGauge {
@@ -44,6 +45,11 @@ pub struct Atmosphere {
     /// Requested storm liters that could not be delivered from finite cloud
     /// storage or into an unblocked surface cell.
     pub rain_unmet_liters:u64,
+    /// Diagnostic surface energy consumed by actual evaporation.
+    /// Terrain/air thermal coupling is not yet implemented.
+    pub evaporation_energy_j:f64,
+    /// Diagnostic latent energy released into the air by condensation.
+    pub condensation_energy_j:f64,
 }
 
 impl Atmosphere {
@@ -69,6 +75,8 @@ impl Atmosphere {
             rain_gauges:HashMap::new(),
             rain_delivered_liters:0,
             rain_unmet_liters:0,
+            evaporation_energy_j:0.0,
+            condensation_energy_j:0.0,
         }
     }
     pub fn cell_index(x:i32,y:i32)->usize {
@@ -130,6 +138,7 @@ impl Atmosphere {
                     if moved>0 {
                         self.cells[idx].vapor_kg+=moved as f64;
                         total+=moved as u32;
+                        self.evaporation_energy_j+=moved as f64*LATENT_HEAT_J_PER_KG;
                     }
                     let remainder=if moved<requested {0.0}
                         else {(fractional-moved as f64).clamp(0.0,0.999_999_999)};
@@ -147,6 +156,7 @@ impl Atmosphere {
                 if moved>0 {
                     self.cells[idx].vapor_kg+=moved as f64;
                     total+=moved as u32;
+                    self.evaporation_energy_j+=moved as f64*LATENT_HEAT_J_PER_KG;
                 }
                 let remainder=if moved<requested {0.0}
                     else {(soil_fractional-moved as f64).clamp(0.0,0.999_999_999)};
@@ -286,6 +296,7 @@ impl Atmosphere {
             if excess>0.0 {
                 cell.vapor_kg-=excess;
                 cell.cloud_kg+=excess;
+                self.condensation_energy_j+=excess*LATENT_HEAT_J_PER_KG;
             }
         }
     }
@@ -405,6 +416,22 @@ mod tests {
         }
         assert_eq!(coarse.rain_delivered_liters,fine.rain_delivered_liters);
         assert_eq!(coarse_t.water.surface_delta_liters,fine_t.water.surface_delta_liters);
+    }
+    #[test]
+    fn latent_energy_ledger_tracks_actual_evaporation_and_condensation() {
+        let mut t=Terrain::new();
+        let mut a=Atmosphere::new_af();
+        let (x,y)=(WORLD_SIZE/2,WORLD_SIZE/2);
+        let z=t.height(x,y)+1;
+        t.water_assign((x,y,z),500);
+        let total=a.evaporate_near(&mut t,x,y,86_400.0);
+        assert!(total>0);
+        assert!((a.evaporation_energy_j-total as f64*LATENT_HEAT_J_PER_KG).abs()<0.01);
+        a.cells[0].vapor_kg=saturation_specific_humidity(27.0)*AIR_MASS_KG*1.5;
+        a.advance_af(1.0);
+        assert!(a.condensation_energy_j>0.0);
+        // Temperatures are externally prescribed in this lab. These are
+        // exact transfer diagnostics, NOT a closed atmospheric heat solver.
     }
     #[test]
     fn periodic_weather_regions_wrap_correctly() {
