@@ -1,5 +1,12 @@
 # Voxel Survival — Vulkan prototype
 
+> **EXPERIMENTAL ISLAND HYDROLOGY LAB BRANCH.** This branch deliberately changes the
+> world to a **1,024 m × 1,024 m** island surrounded by ocean, with a freshwater
+> lake, downhill river, swampy shallows and dry ground. It is separate from
+> production `main`, which retains the original 1,024 km torus.
+> See [the island lab test guide](docs/ISLAND_HYDROLOGY_LAB.md) for locations,
+> water-system tests, and branch switching instructions.
+
 A minimal first-person voxel survival world using **Rust**, **WGPU 0.20**, **Vulkan only**, and **winit**. Art is procedurally generated at startup: original 16×16 dirt, grass-top, grass-side, stone, and water pixel tiles, inspired by earthy survival-game palettes (not copied from Vintage Story).
 
 ## Run
@@ -44,12 +51,12 @@ The first click captures the mouse; subsequent clicks edit blocks. Maximum reach
 ## World rules
 
 - **Horizontal torus:** X and Y wrap, including procedural noise, block edits, collision, ray picking, and mesh coordinates.
-- **World extent:** 1,024,000 × 1,024,000 meters (**1024 km × 1024 km**).
+- **World extent (this branch only):** 1,024 × 1,024 meters (**1 km × 1 km**).
 - **Voxel:** exactly 1 meter.
-- **Logical chunk:** 32 × 32 × 32 voxels; 32,000 × 32,000 horizontal chunk coordinates, eight vertical sections (Z=0..255). The prototype caches nearby 32×32 chunk-column meshes individually on the GPU (logical 32³ storage is a later milestone).
+- **Logical chunk:** 32 × 32 × 32 voxels; 32 × 32 horizontal chunk coordinates, eight vertical sections (Z=0..255). The prototype caches nearby 32×32 chunk-column meshes individually on the GPU (logical 32³ storage is a later milestone).
 - **Vertical:** Z=0..255 (256 blocks); **sea level Z=110**, with alpha-blended finite-volume surface and side tiles.
 - **Player:** collision body 1.3 meters high, 0.56 meters wide; first-person camera 1.18 meters above feet.
-- **Terrain:** seamless multi-scale periodic 4D noise; collision-tested dry-land spawn with neighboring camera clearance; stone, dirt, grass; finite initialized ocean water. Regional plate-boundary, wind-belt, rain-shadow and solar-energy models are available but geological and climate evolution are not yet coupled into terrain generation.
+- **Terrain:** a deterministic authored island test terrain with hill relief, freshwater lake, sloped river, wetland shallows, dry ground and finite ocean water; collision-tested dry-land spawn. Regional plate-boundary, wind-belt, rain-shadow and solar-energy models are available but geological and climate evolution are not yet coupled into terrain generation.
 - **Streaming:** seven-by-seven nearby chunk-column window; existing GPU meshes are retained during movement and only newly entered or locally modified columns are remeshed. Edits and water overrides remain in memory for the session.
 
 ## Simulation progress
