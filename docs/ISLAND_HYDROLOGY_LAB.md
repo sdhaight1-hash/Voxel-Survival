@@ -17,11 +17,11 @@ Coordinates below are shown by the in-game HUD **relative to the map center**, w
 | Swamp / wetlands | (+115,-125) | Z=115 | Shallow ponds separated by grassy hummocks |
 | Ocean | Beyond ~400m radial distance | Z=110 | Saltwater-like *geometry* only; no salinity mechanics |
 
-The landscape is deterministic, not randomly generated every launch. The boundaries connect seamlessly. There are no biome assets, vegetation, salinity, currents or new hydrodynamic algorithms in this branch.
+The island interior has been flattened into a broad plateau around Z=128 with only gentle 1–3m rolling variations. Lake shore, riverbanks and swamp margins are widened for easier traversal; the lake and wetlands themselves remain intentionally lower and wet. The surrounding ocean remains below Z=110.\n\nThe landscape is deterministic, not randomly generated every launch. The boundaries connect seamlessly. There are no biome assets, vegetation, salinity, currents or new hydrodynamic algorithms in this branch.
 
 ### Recommended test route
 
-Start at dry central spawn. Use the compass/HUD to travel **northwest** to the freshwater lake (X roughly -115, Y +125). Dig into its bank, observe water entering a hole, and build/remove submerged blocks. Follow the meandering river east/southeast toward the ocean. Visit the swamp to test shallow puddles and partially filled cells. Travel beyond 400m from the map center to reach the surrounding ocean.
+Start at dry central spawn on the gently rolling inland plateau. The terrain is intentionally easy to walk; water margins still have shallow descents. Use the compass/HUD to travel **northwest** to the freshwater lake (X roughly -115, Y +125). Dig into its bank, observe water entering a hole, and build/remove submerged blocks. Follow the meandering river east/southeast toward the ocean. Visit the swamp to test shallow puddles and partially filled cells. Travel beyond 400m from the map center to reach the surrounding ocean.
 
 The world is intentionally small enough to walk between areas without teleport commands. The 7x7 chunk-column render window remains unchanged, so distant terrain only appears when approached.
 
