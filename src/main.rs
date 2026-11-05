@@ -159,8 +159,10 @@ fn spawn_is_safe(t: &Terrain, position: DVec3) -> bool {
     let y=position.y.floor() as i32;
     for dy in -2..=2 {
         for dx in -2..=2 {
-            if t.height(x+dx,y+dy) + 1 > position.z as i32 + 1 {
-                return false;
+            // Query actual blocks, not just procedural elevation. This also
+            // catches a later block edit beside the intended spawning area.
+            for z in position.z.floor() as i32..=(position.z + PLAYER_HEIGHT + 0.5).floor() as i32 {
+                if t.block(x+dx,y+dy,z).solid() {return false;}
             }
         }
     }
