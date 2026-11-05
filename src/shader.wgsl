@@ -10,6 +10,7 @@ struct VertexInput {
     @location(0) position: vec3<f32>,
     @location(1) uv: vec2<f32>,
     @location(2) tile: u32,
+    @location(3) chunk_offset: vec2<f32>,
 };
 struct VertexOutput {
     @builtin(position) clip_position: vec4<f32>,
@@ -20,7 +21,7 @@ struct VertexOutput {
 @vertex
 fn vs_main(v: VertexInput) -> VertexOutput {
     var o: VertexOutput;
-    o.clip_position = camera.view_proj * vec4<f32>(v.position, 1.0);
+    o.clip_position = camera.view_proj * vec4<f32>(v.position.xy + v.chunk_offset, v.position.z, 1.0);
     o.uv = v.uv;
     o.tile = v.tile;
     // Vertex shading is intentionally subtle; distinct top/side textures do most of the work.
