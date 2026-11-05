@@ -167,6 +167,9 @@ mod tests {
         let before=t.water_liters(x,y,239)+t.water_liters(x,y,240);
         t.step_water(128);
         assert!(t.water_liters(x,y,239)>0);
-        assert_eq!(before,t.water_liters(x,y,239)+t.water_liters(x,y,240));
+        // Water may spread laterally during the same tick. Count *every*
+        // modified cell, not only the original source/destination pair.
+        let total: u32=t.water.amounts.values().map(|&v| v as u32).sum();
+        assert_eq!(before as u32,total);
     }
 }
