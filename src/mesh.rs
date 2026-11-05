@@ -21,6 +21,21 @@ impl Vertex {
         }
     }
 }
+#[repr(C)]
+#[derive(Clone,Copy,Pod,Zeroable)]
+pub struct ChunkOffset {pub xy:[f32;2]}
+impl ChunkOffset {
+    pub fn layout<'a>() -> wgpu::VertexBufferLayout<'a> {
+        wgpu::VertexBufferLayout {
+            array_stride:std::mem::size_of::<Self>() as wgpu::BufferAddress,
+            step_mode:wgpu::VertexStepMode::Instance,
+            attributes:&[wgpu::VertexAttribute {
+                offset:0,shader_location:3,format:wgpu::VertexFormat::Float32x2,
+            }],
+        }
+    }
+}
+
 pub struct Mesh {
     pub vertices: Vec<Vertex>,
     pub indices: Vec<u32>,
