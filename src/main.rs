@@ -2,6 +2,7 @@ mod mesh;
 mod terrain;
 mod hydrology;
 mod geoscience;
+mod hud;
 
 use std::{collections::{HashMap,HashSet}, sync::Arc, time::Instant};
 use bytemuck::{Pod, Zeroable};
@@ -202,6 +203,9 @@ struct Game {
     pipeline: wgpu::RenderPipeline,
     water_pipeline: wgpu::RenderPipeline,
     crosshair_pipeline: wgpu::RenderPipeline,
+    hud_pipeline: wgpu::RenderPipeline,
+    hud_texture: wgpu::Texture,
+    hud_bind: wgpu::BindGroup,
     depth: wgpu::TextureView,
     camera_buffer: wgpu::Buffer,
     camera_bind: wgpu::BindGroup,
@@ -215,6 +219,11 @@ struct Game {
     keys: HashSet<KeyCode>,
     mouse_captured: bool,
     last_frame: Instant,
+    hud_frame_seconds: f32,
+    hud_elapsed: f32,
+    hud_frames: u32,
+    hud_fps: f32,
+    hud_frame_ms: f32,
     physics_accumulator: f32,
     water_accumulator: f32,
     world_time_seconds: f64,
@@ -399,6 +408,67 @@ impl Game {
             }),
             multisample:Default::default(),multiview:None,
         });
+        let hud_texture = device.create_texture(&wgpu::TextureDescriptor {
+            label:Some("HUD RGBA atlas"),
+            size:wgpu::Extent3d {width:hud::WIDTH,height:hud::HEIGHT,depth_or_array_layers:1},
+            mip_level_count:1,sample_count:1,
+            dimension:wgpu::TextureDimension::D2,
+            format:wgpu::TextureFormat::Rgba8Unorm,
+            usage:wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+            view_formats:&[],
+        });
+        let hud_view=hud_texture.create_view(&Default::default());
+        let hud_layout=device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label:Some("hud texture layout"),
+            entries:&[wgpu::BindGroupLayoutEntry {
+                binding:0,
+                visibility:wgpu::ShaderStages::FRAGMENT,
+                ty:wgpu::BindingType::Texture {
+                    sample_type:wgpu::TextureSampleType::Float {filterable:false},
+                    view_dimension:wgpu::TextureViewDimension::D2,
+                    multisampled:false,
+                },
+                count:None,
+            }],
+        });
+        let hud_bind=device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label:Some("hud texture bind"),layout:&hud_layout,
+            entries:&[wgpu::BindGroupEntry {
+                binding:0,resource:wgpu::BindingResource::TextureView(&hud_view)
+            }],
+        });
+        let hud_shader=device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label:Some("hud shader"),
+            source:wgpu::ShaderSource::Wgsl(include_str!("hud.wgsl").into()),
+        });
+        let hud_pipeline_layout=device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label:Some("hud pipeline layout"),
+            bind_group_layouts:&[&camera_layout,&hud_layout],
+            push_constant_ranges:&[],
+        });
+        let hud_pipeline=device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label:Some("diagnostic and compass hud"),
+            layout:Some(&hud_pipeline_layout),
+            vertex:wgpu::VertexState {
+                module:&hud_shader,entry_point:"vs_hud",buffers:&[],
+                compilation_options:Default::default(),
+            },
+            fragment:Some(wgpu::FragmentState {
+                module:&hud_shader,entry_point:"fs_hud",
+                targets:&[Some(wgpu::ColorTargetState {
+                    format:config.format,blend:Some(wgpu::BlendState::ALPHA_BLENDING),
+                    write_mask:wgpu::ColorWrites::ALL,
+                })],compilation_options:Default::default(),
+            }),
+            primitive:Default::default(),
+            depth_stencil:Some(wgpu::DepthStencilState {
+                format:wgpu::TextureFormat::Depth24Plus,
+                depth_write_enabled:false,
+                depth_compare:wgpu::CompareFunction::Always,
+                stencil:Default::default(),bias:Default::default(),
+            }),
+            multisample:Default::default(),multiview:None,
+        });
         let terrain = Terrain::new();
         let spawn_x = WORLD_SIZE as f32 / 2.0;
         let spawn_y = WORLD_SIZE as f32 / 2.0;
@@ -433,16 +503,20 @@ impl Game {
         });
         let mut game = Self {
             surface,device,queue,config,pipeline,water_pipeline,crosshair_pipeline,
+            hud_pipeline,hud_texture,hud_bind,
             depth,
             camera_buffer,camera_bind,texture_bind,
             chunks:Vec::new(),chunk_offsets,
             mesh_origin:(0,0),terrain,player,selected:Block::Dirt,
-            keys:HashSet::new(),mouse_captured:false,last_frame:Instant::now(),physics_accumulator:0.0,water_accumulator:0.0,
+            keys:HashSet::new(),mouse_captured:false,last_frame:Instant::now(),
+            hud_frame_seconds:0.0,hud_elapsed:0.0,hud_frames:0,hud_fps:0.0,hud_frame_ms:0.0,
+            physics_accumulator:0.0,water_accumulator:0.0,
             world_time_seconds:0.0,
             surface_temperature:geoscience::ThermalCell {temperature_c:15.0},
             sunlight:1.0,
         };
         game.rebuild();
+        game.upload_hud();
         game
     }
 
@@ -511,6 +585,23 @@ impl Game {
             self.chunks[index]=self.gpu_chunk(x,y);
         }
     }
+    fn upload_hud(&self) {
+        let data=hud::rasterize(self.player.yaw,self.player.pos.x,
+            self.player.pos.y,self.player.pos.z,
+            self.hud_fps,self.hud_frame_ms);
+        self.queue.write_texture(
+            wgpu::ImageCopyTexture {
+                texture:&self.hud_texture,mip_level:0,
+                origin:wgpu::Origin3d::ZERO,aspect:wgpu::TextureAspect::All,
+            },
+            &data,
+            wgpu::ImageDataLayout {
+                offset:0,bytes_per_row:Some(hud::WIDTH*4),rows_per_image:Some(hud::HEIGHT),
+            },
+            wgpu::Extent3d {width:hud::WIDTH,height:hud::HEIGHT,depth_or_array_layers:1},
+        );
+    }
+
     fn resize(&mut self, size:PhysicalSize<u32>) {
         if size.width == 0 || size.height == 0 { return; }
         self.config.width = size.width;
@@ -520,8 +611,21 @@ impl Game {
     }
     fn update(&mut self) {
         let now = Instant::now();
-        let frame_dt = now.duration_since(self.last_frame).as_secs_f32().min(0.1);
+        let measured_dt = now.duration_since(self.last_frame).as_secs_f32();
+        let frame_dt = measured_dt.min(0.1);
         self.last_frame = now;
+        self.hud_elapsed += measured_dt;
+        self.hud_frame_seconds += measured_dt;
+        self.hud_frames += 1;
+        if self.hud_elapsed >= 0.10 {
+            let average=self.hud_frame_seconds/self.hud_frames as f32;
+            self.hud_fps=1.0/average.max(0.00001);
+            self.hud_frame_ms=average*1000.0;
+            self.hud_elapsed=0.0;
+            self.hud_frame_seconds=0.0;
+            self.hud_frames=0;
+            self.upload_hud();
+        }
         self.world_time_seconds += frame_dt as f64;
         // Twenty real minutes per simulated day, 120 days per year.
         // The solar model uses continuous energy in W/m²; thermal integration
@@ -642,6 +746,11 @@ impl Game {
                 20.min(self.config.width),20.min(self.config.height),
             );
             pass.draw(0..3,0..1);
+            pass.set_pipeline(&self.hud_pipeline);
+            pass.set_bind_group(0,&self.camera_bind,&[]);
+            pass.set_bind_group(1,&self.hud_bind,&[]);
+            pass.set_scissor_rect(0,0,self.config.width,self.config.height);
+            pass.draw(0..3,0..1);
         }
         self.queue.submit(Some(encoder.finish()));
         frame.present();
@@ -728,6 +837,15 @@ mod shader_tests {
             naga::valid::Capabilities::all(),
         ).validate(&module).expect("WGSL shader validation");
     }
+    #[test]
+    fn hud_shader_parses_and_validates() {
+        let module=naga::front::wgsl::parse_str(include_str!("hud.wgsl"))
+            .expect("HUD WGSL syntax");
+        naga::valid::Validator::new(
+            naga::valid::ValidationFlags::all(),naga::valid::Capabilities::all(),
+        ).validate(&module).expect("HUD shader validation");
+    }
+
 }
 
 #[cfg(test)]
