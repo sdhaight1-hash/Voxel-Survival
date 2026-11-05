@@ -233,12 +233,9 @@ fn target_block(t: &Terrain, p: &Player) -> Option<((i32,i32,i32), (i32,i32,i32)
 fn target_water(t:&Terrain,p:&Player) -> Option<(i32,i32,i32)> {
     let start=p.eye();
     let forward=p.forward().as_dvec3();
-    let mut last=None;
     for i in 1..=120 {
         let q=start+forward*(i as f64*0.05);
         let cell=(q.x.floor() as i32,q.y.floor() as i32,q.z.floor() as i32);
-        if last==Some(cell) {continue;}
-        last=Some(cell);
         if t.block(cell.0,cell.1,cell.2)==Block::Water
             && q.z.fract()<t.water_liters(cell.0,cell.1,cell.2) as f64/1000.0 {
             return Some(cell);
@@ -985,6 +982,21 @@ mod movement_tests {
         assert_eq!(t.water.amounts.values().map(|&v|v as u32).sum::<u32>(),600);
         t.set(x+2,y,241,Block::Air);
         assert_eq!(t.block(x+2,y,241),Block::Air);
+    }
+
+    #[test]
+    fn placement_ray_can_select_water_without_a_solid_backing() {
+        let mut t=Terrain::new();
+        let x=WORLD_SIZE/2;
+        let y=WORLD_SIZE/2;
+        t.water.atmosphere_liters=800;
+        t.precipitate((x+2,y,241),800);
+        let mut p=player(x as f32+0.5,y as f32+0.5,240.0);
+        p.yaw=0.0;
+        assert_eq!(target_water(&t,&p),Some((x+2,y,241)));
+        assert!(!player_overlaps_cell(&p,(x+2,y,241)));
+        assert!(t.try_place_solid((x+2,y,241),Block::Dirt));
+        assert_eq!(t.water.amounts.values().map(|&v|v as u32).sum::<u32>(),800);
     }
 
     #[test]
