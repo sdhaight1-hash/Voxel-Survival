@@ -188,7 +188,7 @@ impl Terrain {
             CAPACITY_L
         } else {0}
     }
-    fn water_assign(&mut self, cell:Cell, amount:u16) {
+    pub(crate) fn water_assign(&mut self, cell:Cell, amount:u16) {
         let cell=canonical(cell);
         let old=self.water_liters(cell.0,cell.1,cell.2);
         let new_amount=amount.min(CAPACITY_L);
@@ -196,6 +196,7 @@ impl Terrain {
         self.water.amounts.insert(cell,new_amount);
         self.water.dirty.insert(cell);
         self.water.activate(cell);
+        self.soil.activate((cell.0,cell.1));
     }
     pub fn take_water_dirty(&mut self) -> HashSet<Cell> {
         std::mem::take(&mut self.water.dirty)
