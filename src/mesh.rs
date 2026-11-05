@@ -24,6 +24,7 @@ impl Vertex {
 pub struct Mesh {
     pub vertices: Vec<Vertex>,
     pub indices: Vec<u32>,
+    pub water_index_start: u32,
     pub origin_x: i32,
     pub origin_y: i32,
 }
@@ -68,7 +69,8 @@ fn tile(b: Block, face: usize) -> u32 {
 pub fn build(t: &Terrain, center_x: i32, center_y: i32, radius: i32) -> Mesh {
     let origin_x = center_x.div_euclid(CHUNK_SIZE) * CHUNK_SIZE;
     let origin_y = center_y.div_euclid(CHUNK_SIZE) * CHUNK_SIZE;
-    let mut result = Mesh { vertices: Vec::new(), indices: Vec::new(), origin_x, origin_y };
+    let mut result = Mesh { vertices: Vec::new(), indices: Vec::new(), water_index_start: 0, origin_x, origin_y };
+    let mut water_indices = Vec::new();
     for cy in -radius..=radius {
         for cx in -radius..=radius {
             let base_x = origin_x + cx * CHUNK_SIZE;
@@ -103,7 +105,9 @@ pub fn build(t: &Terrain, center_x: i32, center_y: i32, radius: i32) -> Mesh {
                             let nh = heights[(ly + dy + 1) as usize][(lx + dx + 1) as usize];
                             let neighbor = block(t, x + dx, y + dy, z + dz, nh);
                             let visible = if b == Block::Water {
-                                neighbor == Block::Air
+                                // Only water's exposed upper surface: sides and bottoms
+                                // are not useful until transparent water volumes exist.
+                                face == 4 && neighbor == Block::Air
                             } else {
                                 neighbor == Block::Air || neighbor == Block::Water
                             };
@@ -119,12 +123,15 @@ pub fn build(t: &Terrain, center_x: i32, center_y: i32, radius: i32) -> Mesh {
                                     tile: tile(b, face),
                                 });
                             }
-                            result.indices.extend_from_slice(&[start,start+1,start+2,start,start+2,start+3]);
+                            let indices = if b == Block::Water { &mut water_indices } else { &mut result.indices };
+                            indices.extend_from_slice(&[start,start+1,start+2,start,start+2,start+3]);
                         }
                     }
                 }
             }
         }
     }
+    result.water_index_start = result.indices.len() as u32;
+    result.indices.extend(water_indices);
     result
 }
