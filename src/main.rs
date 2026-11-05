@@ -897,6 +897,33 @@ mod movement_tests {
     }
 
     #[test]
+    fn subcentimeter_motion_is_not_lost_at_large_world_coordinates() {
+        let t = Terrain::new();
+        let center = WORLD_SIZE as f64 / 2.0;
+        let mut p = Player {
+            pos:DVec3::new(center + 0.5,center + 0.5,230.0),
+            velocity_z:0.0,yaw:0.0,pitch:0.0,grounded:false,
+        };
+        let start = p.pos.x;
+        update_player(&mut p,&t,&HashSet::from([KeyCode::KeyW]),0.0002);
+        let moved = p.pos.x - start;
+        assert!((moved - 0.001).abs() < 0.000_001,
+            "1mm movement must survive at world center; got {moved}");
+    }
+
+    #[test]
+    fn world_wrapping_preserves_fractional_player_position() {
+        let t = Terrain::new();
+        let mut p=Player {
+            pos:DVec3::new(WORLD_SIZE as f64 - 0.001,500_000.5,230.0),
+            velocity_z:0.0,yaw:0.0,pitch:0.0,grounded:false,
+        };
+        update_player(&mut p,&t,&HashSet::from([KeyCode::KeyW]),0.001);
+        assert!((p.pos.x-0.004).abs() < 0.000_001,
+            "wrapped X should retain millimeter precision: {}",p.pos.x);
+    }
+
+    #[test]
     fn grounded_player_stays_at_exact_same_height() {
         let mut t=Terrain::new();
         let x=WORLD_SIZE/2;
