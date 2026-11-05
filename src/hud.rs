@@ -119,8 +119,8 @@ mod tests {
         assert!((latitude_degrees(0.0)-latitude_degrees(WORLD_SIZE as f64)).abs()<1e-10);
         assert!(latitude_degrees(WORLD_SIZE as f64/4.0) < -89.99);
         assert!(latitude_degrees(WORLD_SIZE as f64*0.5+10_000.0)>0.0);
-        assert!(latitude_degrees(WORLD_SIZE as f32*0.5-10_000.0)<0.0);
-        assert!(latitude_degrees(WORLD_SIZE as f32*0.5).abs()<0.000001);
+        assert!(latitude_degrees(WORLD_SIZE as f64*0.5-10_000.0)<0.0);
+        assert!(latitude_degrees(WORLD_SIZE as f64*0.5).abs()<0.000001);
     }
     #[test]
     fn atlas_is_rgba_and_nonempty() {
