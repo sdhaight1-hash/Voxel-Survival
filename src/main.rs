@@ -2,6 +2,7 @@ mod mesh;
 mod terrain;
 mod hydrology;
 mod soil;
+mod atmosphere;
 mod geoscience;
 mod hud;
 
@@ -310,6 +311,7 @@ struct Game {
     chunk_offsets: wgpu::Buffer,
     mesh_origin: (i32, i32),
     terrain: Terrain,
+    atmosphere: atmosphere::Atmosphere,
     player: Player,
     selected: Block,
     keys: HashSet<KeyCode>,
@@ -581,7 +583,9 @@ impl Game {
             depth,
             camera_buffer,camera_bind,texture_bind,
             chunks:Vec::new(),chunk_offsets,
-            mesh_origin:(0,0),terrain,player,selected:Block::Dirt,
+            mesh_origin:(0,0),terrain,
+            atmosphere:atmosphere::Atmosphere::new_af(),
+            player,selected:Block::Dirt,
             keys:HashSet::new(),mouse_captured:false,last_frame:Instant::now(),
             hud_frame_seconds:0.0,hud_elapsed:0.0,hud_frames:0,hud_fps:0.0,hud_frame_ms:0.0,
             physics_accumulator:0.0,water_accumulator:0.0,
@@ -669,7 +673,10 @@ impl Game {
             self.player.pos.y,self.player.pos.z,
             self.hud_fps,self.hud_frame_ms,self.time_scale,self.world_time_seconds,
             water_liters,self.terrain.water.active.len(),
-            self.terrain.water.surface_delta_liters,self.terrain.water.atmosphere_liters);
+            self.terrain.water.surface_delta_liters,self.terrain.water.atmosphere_liters,
+            self.terrain.water_mass_error_liters(),
+            self.atmosphere.relative_humidity(sample.0,sample.1),
+            self.atmosphere.cells[atmosphere::Atmosphere::cell_index(sample.0,sample.1)].temperature_c);
         self.queue.write_texture(
             wgpu::ImageCopyTexture {
                 texture:&self.hud_texture,mip_level:0,
@@ -760,6 +767,7 @@ impl Game {
             self.soil_accumulator=0.0;
             self.soil_climate_seconds=0.0;
             self.terrain.step_soil(elapsed,4096);
+            self.atmosphere.advance_af(elapsed);
         }
         let dirty=self.terrain.take_water_dirty();
         if !dirty.is_empty() {self.refresh_edited_chunks(&dirty);}
