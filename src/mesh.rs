@@ -141,13 +141,20 @@ pub fn build(t: &Terrain, center_x: i32, center_y: i32, radius: i32) -> Mesh {
                         for (face, &(dx,dy,dz)) in DIRECTIONS.iter().enumerate() {
                             let nh = heights[(ly + dy + 1) as usize][(lx + dx + 1) as usize];
                             let neighbor = block(t, x + dx, y + dy, z + dz, nh);
+                            let current_fill = if b == Block::Water {
+                                t.water_liters(x,y,z) as f32 / 1000.0
+                            } else {1.0};
+                            let neighbor_fill = if neighbor == Block::Water && face < 4 {
+                                t.water_liters(x+dx,y+dy,z) as f32 / 1000.0
+                            } else {0.0};
                             let visible = if b == Block::Water {
-                                // Render surface + exposed sides of partial liquid cells.
+                                // Never draw an internal panel between adjacent
+                                // water cells: only the portion ABOVE the lower
+                                // neighbor water level is exposed.
                                 (face == 4 && neighbor == Block::Air)
                                     || (face < 4 && (neighbor == Block::Air
-                                        || (neighbor == Block::Water
-                                           && t.water_liters(x,y,z)
-                                                > t.water_liters(x+dx,y+dy,z))))
+                                        || neighbor == Block::Water)
+                                        && current_fill > neighbor_fill)
                             } else {
                                 neighbor == Block::Air || neighbor == Block::Water
                             };
@@ -157,11 +164,14 @@ pub fn build(t: &Terrain, center_x: i32, center_y: i32, radius: i32) -> Mesh {
                             let py = delta(y, origin_y) as f32;
                             for i in 0..4 {
                                 let c = CORNERS[face][i];
-                                let level = if b == Block::Water {
-                                    t.water_liters(x,y,z) as f32 / 1000.0
-                                } else {1.0};
+                                let bottom = if b == Block::Water && face < 4 {
+                                    neighbor_fill
+                                } else {0.0};
+                                let surface_z = if c[2] > 0.5 {
+                                    current_fill
+                                } else {bottom};
                                 result.vertices.push(Vertex {
-                                    pos: [px + c[0], py + c[1], z as f32 + c[2] * level],
+                                    pos: [px + c[0], py + c[1], z as f32 + surface_z],
                                     uv: UV[i],
                                     tile: tile(b, face),
                                 });
@@ -177,4 +187,53 @@ pub fn build(t: &Terrain, center_x: i32, center_y: i32, radius: i32) -> Mesh {
     result.water_index_start = result.indices.len() as u32;
     result.indices.extend(water_indices);
     result
+}
+
+#[cfg(test)]
+mod water_mesh_tests {
+    use super::*;
+    use crate::terrain::WORLD_SIZE;
+
+    #[test]
+    fn partial_water_neighbors_emit_only_height_difference_not_full_panels() {
+        let mut t=Terrain::new();
+        let x=WORLD_SIZE/2;
+        let y=WORLD_SIZE/2;
+        t.water.atmosphere_liters=1200;
+        assert_eq!(t.precipitate((x,y,240),800),800);
+        assert_eq!(t.precipitate((x+1,y,240),400),400);
+        let m=build(&t,x,y,0);
+        let start=m.water_index_start as usize;
+        let mut found=false;
+        for tri in m.indices[start..].chunks_exact(3) {
+            let a=m.vertices[tri[0] as usize].pos;
+            let b=m.vertices[tri[1] as usize].pos;
+            let c=m.vertices[tri[2] as usize].pos;
+            // The east-facing side of the 800L cell lies at local X=1,
+            // Y 0..1 and Z 240.4..240.8.
+            if [a,b,c].iter().all(|v|(v[0]-1.0).abs()<1e-5)
+                && [a,b,c].iter().all(|v|v[1]>=0.0 && v[1]<=1.0)
+                && [a,b,c].iter().all(|v|v[2]>=240.3999 && v[2]<=240.8001)
+                && [a,b,c].iter().any(|v|(v[2]-240.4).abs()<1e-4)
+                && [a,b,c].iter().any(|v|(v[2]-240.8).abs()<1e-4) {
+                found=true;
+            }
+        }
+        assert!(found,"missing exposed height-difference side");
+    }
+
+    #[test]
+    fn placing_over_water_does_not_remove_exposed_neighbor_water() {
+        let mut t=Terrain::new();
+        let x=WORLD_SIZE/2;
+        let y=WORLD_SIZE/2;
+        t.water.atmosphere_liters=800;
+        assert_eq!(t.precipitate((x,y,240),800),800);
+        // Solid directly above should occlude only that top, not the
+        // east side bordering empty air.
+        t.set(x,y,241,Block::Stone);
+        let m=build(&t,x,y,0);
+        assert!(m.indices.len()>m.water_index_start as usize);
+        assert_eq!(t.water_liters(x,y,240),800);
+    }
 }

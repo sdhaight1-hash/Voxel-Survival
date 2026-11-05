@@ -39,7 +39,7 @@ Debug builds also work with `cargo run`, but initial terrain meshing is signific
 - Readouts refresh approximately ten times a second to reduce texture uploads; frame time
   is the average game-frame duration, not GPU-only render duration.
 
-The first click captures the mouse; subsequent clicks edit blocks. Maximum reach is 6 meters. Placement into a water-filled voxel is currently disabled rather than silently deleting finite water.
+The first click captures the mouse; subsequent clicks edit blocks. Maximum reach is 6 meters. Blocks can now be placed into water by conservatively displacing its stored liters into reachable space; placement is refused if the volume cannot be accommodated. Solid blocks can be mined through water.
 
 ## World rules
 
@@ -78,7 +78,7 @@ There are no persistent saves, caves, inventory, groundwater, actual moving
 tectonic plates, atmospheric moisture advection, realistic pressure-driven
 water flow, or full climate/weather yet. Initial terrain is still procedural
 noise; the tectonic uplift model is a tested regional primitive not yet used
-to build the height map. Water visuals are basic and no underwater shading
+to build the height map. Water visuals now cull internal faces between unequal fluid levels but still lack sorted transparency and no underwater shading
 exists. First-time chunk meshing and edits are still synchronous, although
 already cached chunks are reused across boundary crossings. Stable Rust
 checks and unit tests run in CI; a real Windows Vulkan playtest is required.

@@ -195,6 +195,21 @@ fn find_safe_spawn(t: &Terrain) -> Player {
     panic!("No collision-free dry spawn found within 256m of map center");
 }
 
+// A block can be placed in water, but never into the player's own AABB.
+// Use toroidal deltas so this remains correct across both map seams.
+fn player_overlaps_cell(p:&Player, cell:(i32,i32,i32)) -> bool {
+    let fx=p.pos.x.fract();
+    let fy=p.pos.y.fract();
+    let dx=terrain::delta(cell.0,p.pos.x.floor() as i32) as f64;
+    let dy=terrain::delta(cell.1,p.pos.y.floor() as i32) as f64;
+    dx < fx + PLAYER_RADIUS-COLLISION_EPS
+        && dx+1.0 > fx-PLAYER_RADIUS+COLLISION_EPS
+        && dy < fy+PLAYER_RADIUS-COLLISION_EPS
+        && dy+1.0 > fy-PLAYER_RADIUS+COLLISION_EPS
+        && (cell.2 as f64) < p.pos.z+PLAYER_HEIGHT-COLLISION_EPS
+        && ((cell.2+1) as f64) > p.pos.z+COLLISION_EPS
+}
+
 // Return targeted solid block and the preceding empty cell.
 fn target_block(t: &Terrain, p: &Player) -> Option<((i32,i32,i32), (i32,i32,i32))> {
     let start = p.eye();
@@ -208,6 +223,24 @@ fn target_block(t: &Terrain, p: &Player) -> Option<((i32,i32,i32), (i32,i32,i32)
             return previous.map(|empty| (cell, empty));
         }
         previous = Some(cell);
+    }
+    None
+}
+
+// When no solid block is in reach, right click can still place a solid
+// directly into a visible water voxel. Check the actual partial water level,
+// not just the cell's occupancy classification.
+fn target_water(t:&Terrain,p:&Player) -> Option<(i32,i32,i32)> {
+    let start=p.eye();
+    let forward=p.forward().as_dvec3();
+    for i in 1..=120 {
+        let q=start+forward*(i as f64*0.05);
+        let cell=(q.x.floor() as i32,q.y.floor() as i32,q.z.floor() as i32);
+        if t.block(cell.0,cell.1,cell.2)==Block::Water
+            && q.z.fract()<t.water_liters(cell.0,cell.1,cell.2) as f64/1000.0 {
+            return Some(cell);
+        }
+        if t.block(cell.0,cell.1,cell.2).solid() {break;}
     }
     None
 }
@@ -704,25 +737,32 @@ impl Game {
         self.queue.write_buffer(&self.camera_buffer,0,bytemuck::bytes_of(&uniform));
     }
     fn edit(&mut self, button:MouseButton) {
-        if let Some((hit,empty)) = target_block(&self.terrain,&self.player) {
-            match button {
-                MouseButton::Left => self.terrain.set(hit.0,hit.1,hit.2,Block::Air),
-                MouseButton::Right => {
-                    let old = self.terrain.block(empty.0,empty.1,empty.2);
-                    // Until displacement is implemented, never delete finite
-                    // water volume when placing a block.
-                    if old == Block::Air {
-                        self.terrain.set(empty.0,empty.1,empty.2,self.selected);
-                        if collides(&self.terrain,self.player.pos) {
-                            self.terrain.set(empty.0,empty.1,empty.2,old);
-                        }
+        let solid_target=target_block(&self.terrain,&self.player);
+        let mut changed=HashSet::new();
+        match button {
+            // Water is transparent to mining rays: mine the solid underneath.
+            MouseButton::Left=>{
+                if let Some((hit,_))=solid_target {
+                    self.terrain.set(hit.0,hit.1,hit.2,Block::Air);
+                    changed.insert(hit);
+                }
+            }
+            MouseButton::Right=>{
+                // Prefer the face against a submerged solid, but allow free
+                // placement in visible water when no solid can be targeted.
+                let placement=solid_target.map(|(_,empty)|empty)
+                    .or_else(||target_water(&self.terrain,&self.player));
+                if let Some(cell)=placement {
+                    if !player_overlaps_cell(&self.player,cell)
+                        && self.terrain.try_place_solid(cell,self.selected) {
+                        changed.insert(cell);
                     }
                 }
-                _ => return,
             }
-            let changed=HashSet::from([hit,empty]);
-            self.refresh_edited_chunks(&changed);
+            _=>return,
         }
+        changed.extend(self.terrain.take_water_dirty());
+        if !changed.is_empty() {self.refresh_edited_chunks(&changed);}
     }
     fn render(&mut self) -> Result<(),wgpu::SurfaceError> {
         let frame = self.surface.get_current_texture()?;
@@ -921,6 +961,42 @@ mod movement_tests {
         }
         assert!(peak > 202.15, "jump must exceed one-meter obstacle with clearance");
         assert!(p.pos.x > x as f64 + 3.3, "player should traverse the block");
+    }
+
+    #[test]
+    fn ray_targets_solid_through_water_for_underwater_mining_and_placement() {
+        let mut t=Terrain::new();
+        let x=WORLD_SIZE/2;
+        let y=WORLD_SIZE/2;
+        t.set(x+2,y,241,Block::Stone);
+        t.water.atmosphere_liters=600;
+        assert_eq!(t.precipitate((x+1,y,241),600),600);
+        let mut p=player(x as f32+0.5,y as f32+0.5,240.0);
+        p.yaw=0.0;
+        let (hit,previous)=target_block(&t,&p).expect("submerged wall target");
+        assert_eq!(hit,(x+2,y,241));
+        assert_eq!(previous,(x+1,y,241));
+        assert!(!player_overlaps_cell(&p,previous));
+        assert!(t.try_place_solid(previous,Block::Dirt));
+        assert_eq!(t.block(x+1,y,241),Block::Dirt);
+        assert_eq!(t.water.amounts.values().map(|&v|v as u32).sum::<u32>(),600);
+        t.set(x+2,y,241,Block::Air);
+        assert_eq!(t.block(x+2,y,241),Block::Air);
+    }
+
+    #[test]
+    fn placement_ray_can_select_water_without_a_solid_backing() {
+        let mut t=Terrain::new();
+        let x=WORLD_SIZE/2;
+        let y=WORLD_SIZE/2;
+        t.water.atmosphere_liters=800;
+        t.precipitate((x+2,y,241),800);
+        let mut p=player(x as f32+0.5,y as f32+0.5,240.0);
+        p.yaw=0.0;
+        assert_eq!(target_water(&t,&p),Some((x+2,y,241)));
+        assert!(!player_overlaps_cell(&p,(x+2,y,241)));
+        assert!(t.try_place_solid((x+2,y,241),Block::Dirt));
+        assert_eq!(t.water.amounts.values().map(|&v|v as u32).sum::<u32>(),800);
     }
 
     #[test]
