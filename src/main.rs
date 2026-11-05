@@ -227,6 +227,27 @@ fn target_block(t: &Terrain, p: &Player) -> Option<((i32,i32,i32), (i32,i32,i32)
     None
 }
 
+// When no solid block is in reach, right click can still place a solid
+// directly into a visible water voxel. Check the actual partial water level,
+// not just the cell's occupancy classification.
+fn target_water(t:&Terrain,p:&Player) -> Option<(i32,i32,i32)> {
+    let start=p.eye();
+    let forward=p.forward().as_dvec3();
+    let mut last=None;
+    for i in 1..=120 {
+        let q=start+forward*(i as f64*0.05);
+        let cell=(q.x.floor() as i32,q.y.floor() as i32,q.z.floor() as i32);
+        if last==Some(cell) {continue;}
+        last=Some(cell);
+        if t.block(cell.0,cell.1,cell.2)==Block::Water
+            && q.z.fract()<t.water_liters(cell.0,cell.1,cell.2) as f64/1000.0 {
+            return Some(cell);
+        }
+        if t.block(cell.0,cell.1,cell.2).solid() {break;}
+    }
+    None
+}
+
 fn pixel_noise(x: u32, y: u32, tile: u32) -> u32 {
     let mut n = x.wrapping_mul(374761393)
         ^ y.wrapping_mul(668265263) ^ tile.wrapping_mul(2246822519) ^ 0xA341316C;
@@ -719,28 +740,32 @@ impl Game {
         self.queue.write_buffer(&self.camera_buffer,0,bytemuck::bytes_of(&uniform));
     }
     fn edit(&mut self, button:MouseButton) {
-        if let Some((hit,empty))=target_block(&self.terrain,&self.player) {
-            let mut changed=HashSet::new();
-            match button {
-                // Ray selection already treats water as transparent. Solid
-                // blocks can be mined while submerged or beneath liquid.
-                MouseButton::Left=>{
+        let solid_target=target_block(&self.terrain,&self.player);
+        let mut changed=HashSet::new();
+        match button {
+            // Water is transparent to mining rays: mine the solid underneath.
+            MouseButton::Left=>{
+                if let Some((hit,_))=solid_target {
                     self.terrain.set(hit.0,hit.1,hit.2,Block::Air);
                     changed.insert(hit);
                 }
-                MouseButton::Right=>{
-                    if !player_overlaps_cell(&self.player,empty)
-                        && self.terrain.try_place_solid(empty,self.selected) {
-                        changed.insert(empty);
+            }
+            MouseButton::Right=>{
+                // Prefer the face against a submerged solid, but allow free
+                // placement in visible water when no solid can be targeted.
+                let placement=solid_target.map(|(_,empty)|empty)
+                    .or_else(||target_water(&self.terrain,&self.player));
+                if let Some(cell)=placement {
+                    if !player_overlaps_cell(&self.player,cell)
+                        && self.terrain.try_place_solid(cell,self.selected) {
+                        changed.insert(cell);
                     }
                 }
-                _=>return,
             }
-            // Displacing a submerged voxel can alter multiple neighboring
-            // water cells; all affected chunk meshes must be refreshed now.
-            changed.extend(self.terrain.take_water_dirty());
-            if !changed.is_empty() {self.refresh_edited_chunks(&changed);}
+            _=>return,
         }
+        changed.extend(self.terrain.take_water_dirty());
+        if !changed.is_empty() {self.refresh_edited_chunks(&changed);}
     }
     fn render(&mut self) -> Result<(),wgpu::SurfaceError> {
         let frame = self.surface.get_current_texture()?;
