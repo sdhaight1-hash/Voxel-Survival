@@ -21,11 +21,11 @@ fn fs_hud(@builtin(position) frag:vec4<f32>) -> @location(0) vec4<f32> {
     let center_left=(camera.viewport.x - 416.0)*0.5;
     let right_left=camera.viewport.x - 332.0;
     var atlas_x=-1.0;
-    if x>=center_left && x<center_left+416.0 && y>=12.0 && y<136.0 {
+    if x>=center_left && x<center_left+416.0 && y>=12.0 && y<156.0 {
         atlas_x=x-center_left;
     }
     // Right-hand diagnostics take precedence on narrow windows.
-    if x>=right_left && x<right_left+320.0 && y>=12.0 && y<136.0 {
+    if x>=right_left && x<right_left+320.0 && y>=12.0 && y<156.0 {
         atlas_x=416.0+x-right_left;
     }
     if atlas_x<0.0 {discard;}
