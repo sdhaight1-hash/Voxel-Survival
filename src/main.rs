@@ -43,14 +43,23 @@ impl Player {
     fn eye(&self) -> Vec3 { self.pos + Vec3::Z * EYE_HEIGHT }
 }
 
+// Player is a continuous AABB; voxel coordinates are integer unit cubes.
+// The epsilon avoids treating a mere face-to-face touch as penetration.
+const COLLISION_EPS: f32 = 0.0001;
+const GROUND_PROBE: f32 = 0.025;
+const PHYSICS_DT: f32 = 1.0 / 120.0;
+
 fn collides(t: &Terrain, pos: Vec3) -> bool {
-    for dx in [-PLAYER_RADIUS, PLAYER_RADIUS] {
-        for dy in [-PLAYER_RADIUS, PLAYER_RADIUS] {
-            for dz in [0.04, 0.65, PLAYER_HEIGHT - 0.02] {
-                let p = pos + Vec3::new(dx,dy,dz);
-                if t.block(p.x.floor() as i32, p.y.floor() as i32, p.z.floor() as i32).solid() {
-                    return true;
-                }
+    let min_x = (pos.x - PLAYER_RADIUS + COLLISION_EPS).floor() as i32;
+    let max_x = (pos.x + PLAYER_RADIUS - COLLISION_EPS).floor() as i32;
+    let min_y = (pos.y - PLAYER_RADIUS + COLLISION_EPS).floor() as i32;
+    let max_y = (pos.y + PLAYER_RADIUS - COLLISION_EPS).floor() as i32;
+    let min_z = (pos.z + COLLISION_EPS).floor() as i32;
+    let max_z = (pos.z + PLAYER_HEIGHT - COLLISION_EPS).floor() as i32;
+    for z in min_z..=max_z {
+        for y in min_y..=max_y {
+            for x in min_x..=max_x {
+                if t.block(x, y, z).solid() { return true; }
             }
         }
     }
@@ -58,56 +67,73 @@ fn collides(t: &Terrain, pos: Vec3) -> bool {
 }
 fn wrap_pos(v: f32) -> f32 { v.rem_euclid(WORLD_SIZE as f32) }
 
-fn update_player(p: &mut Player, t: &Terrain, keys: &HashSet<KeyCode>, dt: f32) {
+fn support_below(t: &Terrain, p: &Player) -> bool {
+    collides(t, p.pos - Vec3::Z * GROUND_PROBE)
+}
+fn horizontal_direction(p: &Player, keys: &HashSet<KeyCode>) -> Vec3 {
     let forward = Vec3::new(p.yaw.cos(), p.yaw.sin(), 0.0);
-    // In our Z-up coordinates, positive yaw turns the camera counterclockwise.
-    // Screen-right is the clockwise perpendicular to horizontal forward.
     let right = Vec3::new(p.yaw.sin(), -p.yaw.cos(), 0.0);
-    let mut movement = Vec3::ZERO;
-    if keys.contains(&KeyCode::KeyW) { movement += forward; }
-    if keys.contains(&KeyCode::KeyS) { movement -= forward; }
-    if keys.contains(&KeyCode::KeyD) { movement += right; }
-    if keys.contains(&KeyCode::KeyA) { movement -= right; }
-    if movement.length_squared() > 0.0 { movement = movement.normalize() * 5.0 * dt; }
+    let mut v = Vec3::ZERO;
+    if keys.contains(&KeyCode::KeyW) { v += forward; }
+    if keys.contains(&KeyCode::KeyS) { v -= forward; }
+    if keys.contains(&KeyCode::KeyD) { v += right; }
+    if keys.contains(&KeyCode::KeyA) { v -= right; }
+    if v.length_squared() > 0.0 { v.normalize() } else { v }
+}
 
-    // Resolve jumping before horizontal motion, so a rising player can climb
-    // the face of a one-meter block instead of being blocked for that frame.
+// Called at a fixed 120 Hz, never with the display frame duration.
+fn update_player(p: &mut Player, t: &Terrain, keys: &HashSet<KeyCode>, dt: f32) {
+    let supported = support_below(t, p);
+    if p.velocity_z <= 0.0 && supported {
+        p.grounded = true;
+        p.velocity_z = 0.0;
+    } else if p.grounded && !supported {
+        p.grounded = false;
+    }
+
     if p.grounded && keys.contains(&KeyCode::Space) {
         p.velocity_z = JUMP_SPEED;
         p.grounded = false;
     }
-
-    // Substep vertical movement to avoid skipping thin obstacles at high fall speed.
-    let previous_velocity = p.velocity_z;
-    p.velocity_z = (p.velocity_z - GRAVITY * dt).max(-35.0);
-    let displacement = (previous_velocity + p.velocity_z) * 0.5 * dt;
-    let steps = (displacement.abs() / 0.10).ceil().max(1.0) as usize;
-    for _ in 0..steps {
-        let candidate = p.pos + Vec3::Z * (displacement / steps as f32);
-        if collides(t, candidate) {
-            if displacement < 0.0 {
-                // The collision occurred while crossing the top of a block.
-                p.pos.z = candidate.z.floor() + 1.0;
-                p.grounded = true;
+    if !p.grounded {
+        let old_velocity = p.velocity_z;
+        p.velocity_z = (p.velocity_z - GRAVITY * dt).max(-35.0);
+        let travel = (old_velocity + p.velocity_z) * 0.5 * dt;
+        let steps = (travel.abs() / 0.06).ceil().max(1.0) as usize;
+        for _ in 0..steps {
+            let candidate = p.pos + Vec3::Z * (travel / steps as f32);
+            if collides(t, candidate) {
+                // Small substeps keep the player at their last nonpenetrating
+                // position; no floor(z)+1 teleport / forced camera movement.
+                if travel < 0.0 {
+                    // The collided surface is the highest occupied block under
+                    // the feet. Snap only if it is within this small travel step.
+                    let top = candidate.z.floor() + 1.0;
+                    if top >= p.pos.z - 0.07 && top <= p.pos.z + 0.07 {
+                        p.pos.z = top;
+                    }
+                    p.grounded = true;
+                }
+                p.velocity_z = 0.0;
+                break;
             }
-            p.velocity_z = 0.0;
-            break;
+            p.pos = candidate;
         }
-        p.pos = candidate;
-        p.grounded = false;
     }
 
-    // Only collide horizontally. The previous full-meter auto-step made
-    // characters teleport up cliffs instead of having to jump them.
-    let steps = (movement.length() / 0.10).ceil().max(1.0) as usize;
+    let travel = horizontal_direction(p, keys) * 5.0 * dt;
+    let steps = (travel.length() / 0.08).ceil().max(1.0) as usize;
     for _ in 0..steps {
-        let step = movement / steps as f32;
+        let step = travel / steps as f32;
+        // Independent axes permit sliding along walls.
         let x = Vec3::new(wrap_pos(p.pos.x + step.x), p.pos.y, p.pos.z);
         if !collides(t, x) { p.pos = x; }
         let y = Vec3::new(p.pos.x, wrap_pos(p.pos.y + step.y), p.pos.z);
         if !collides(t, y) { p.pos = y; }
     }
-    // Prevent leaving the vertical world bounds.
+    // A ledge can be crossed during horizontal movement; it is no longer
+    // supported, but gravity starts on the next fixed simulation step.
+    if p.grounded && !support_below(t, p) { p.grounded = false; }
     p.pos.z = p.pos.z.clamp(0.0, (WORLD_HEIGHT - 2) as f32);
 }
 
@@ -180,6 +206,7 @@ struct Game {
     keys: HashSet<KeyCode>,
     mouse_captured: bool,
     last_frame: Instant,
+    physics_accumulator: f32,
 }
 
 fn depth_view(device: &wgpu::Device, size: PhysicalSize<u32>) -> wgpu::TextureView {
@@ -400,7 +427,7 @@ impl Game {
             vertex_buffer:placeholder,index_buffer:index_placeholder,index_count:0,
             opaque_index_count:0,
             mesh_origin:(0,0),terrain,player,selected:Block::Dirt,
-            keys:HashSet::new(),mouse_captured:false,last_frame:Instant::now(),
+            keys:HashSet::new(),mouse_captured:false,last_frame:Instant::now(),physics_accumulator:0.0,
         };
         game.rebuild();
         game
@@ -429,9 +456,15 @@ impl Game {
     }
     fn update(&mut self) {
         let now = Instant::now();
-        let dt = now.duration_since(self.last_frame).as_secs_f32().min(0.05);
+        let frame_dt = now.duration_since(self.last_frame).as_secs_f32().min(0.1);
         self.last_frame = now;
-        update_player(&mut self.player,&self.terrain,&self.keys,dt);
+        self.physics_accumulator += frame_dt;
+        let mut ticks = 0;
+        while self.physics_accumulator >= PHYSICS_DT && ticks < 12 {
+            update_player(&mut self.player, &self.terrain, &self.keys, PHYSICS_DT);
+            self.physics_accumulator -= PHYSICS_DT;
+            ticks += 1;
+        }
         let cx = (self.player.pos.x as i32).div_euclid(32) * 32;
         let cy = (self.player.pos.y as i32).div_euclid(32) * 32;
         if (cx,cy) != self.mesh_origin { self.rebuild(); }
