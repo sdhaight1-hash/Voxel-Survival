@@ -12,6 +12,7 @@ pub struct SoilColumn {
     pub groundwater_l:u16,
     infiltration_remainder:f64,
     percolation_remainder:f64,
+    spring_remainder:f64,
 }
 
 #[derive(Default)]
@@ -102,6 +103,7 @@ impl Terrain {
         let mut column=self.soil.columns.get(&key).copied().unwrap_or(SoilColumn {
             moisture_l:material.initial_l,groundwater_l:0,
             infiltration_remainder:0.0,percolation_remainder:0.0,
+            spring_remainder:0.0,
         });
         // Only near-surface accessible water evaporates. Drier soil retains
         // a finite residual; detailed capillary transport comes later.
@@ -127,6 +129,7 @@ impl Terrain {
             let mut column=self.soil.columns.get(&key).copied().unwrap_or(SoilColumn {
                 moisture_l:mat.initial_l,groundwater_l:0,
                 infiltration_remainder:0.0,percolation_remainder:0.0,
+            spring_remainder:0.0,
             });
             let bed=self.height(key.0,key.1)+1;
             let surface=if bed<crate::terrain::WORLD_HEIGHT {
@@ -152,12 +155,25 @@ impl Terrain {
                 column.groundwater_l+=percolated;
                 changed+=1;
             }
+            // Saturated groundwater may seep back into the surface.
+            // This is a conservative transfer, not new runoff or a sink.
+            let current_surface=self.water_liters(key.0,key.1,bed);
+            let spring_supply=column.groundwater_l.saturating_sub(900)
+                .min(1000u16.saturating_sub(current_surface));
+            let seeped=transfer_rate(4.0,dt_climate_seconds,
+                &mut column.spring_remainder,spring_supply);
+            if seeped>0 {
+                column.groundwater_l-=seeped;
+                self.water_assign((key.0,key.1,bed),current_surface+seeped);
+                changed+=1;
+            }
             self.update_soil_column(key,column);
             // Keep wet ground updating only if more runoff could infiltrate
             // or gravity drainage can still occur. Inactive soil sleeps.
             if (surface>0 && column.moisture_l<mat.capacity_l)
                 || (column.moisture_l>mat.field_capacity_l
-                    && column.groundwater_l<1000) {
+                    && column.groundwater_l<1000)
+                || column.groundwater_l>900 {
                 self.soil.active.insert(key);
             }
         }
@@ -191,6 +207,7 @@ mod tests {
         t.update_soil_column((x,y),SoilColumn{
             moisture_l:material.capacity_l,groundwater_l:1000,
             infiltration_remainder:0.0,percolation_remainder:0.0,
+            spring_remainder:0.0,
         });
         t.water_assign((x,y,bed),90);
         let before=t.water_mass_error_liters();
@@ -213,12 +230,48 @@ mod tests {
         assert_eq!(t.water_mass_error_liters(),before);
     }
     #[test]
+    fn high_water_table_recharges_surface_as_finite_spring() {
+        let mut t=Terrain::new();
+        let (x,y)=(WORLD_SIZE/2,WORLD_SIZE/2);
+        let bed=t.height(x,y)+1;
+        let mat=SoilMaterial::from_terrain(&t,x,y);
+        t.update_soil_column((x,y),SoilColumn {
+            moisture_l:mat.capacity_l,groundwater_l:1000,
+            infiltration_remainder:0.0,percolation_remainder:0.0,
+            spring_remainder:0.0,
+        });
+        t.soil.activate((x,y));
+        let before=t.water_mass_error_liters();
+        t.step_soil(3600.0,128);
+        assert_eq!(t.groundwater_liters(x,y),996);
+        assert_eq!(t.water_liters(x,y,bed),4);
+        assert_eq!(t.water_mass_error_liters(),before);
+    }
+    #[test]
+    fn springs_cannot_discharge_through_stone() {
+        let mut t=Terrain::new();
+        let (x,y)=(WORLD_SIZE/2,WORLD_SIZE/2);
+        let h=t.height(x,y);
+        let mat=SoilMaterial::from_terrain(&t,x,y);
+        t.update_soil_column((x,y),SoilColumn {
+            moisture_l:mat.capacity_l,groundwater_l:1000,
+            infiltration_remainder:0.0,percolation_remainder:0.0,
+            spring_remainder:0.0,
+        });
+        t.set(x,y,h,Block::Stone);
+        let before=t.water_mass_error_liters();
+        t.step_soil(3600.0,128);
+        assert_eq!(t.groundwater_liters(x,y),1000);
+        assert_eq!(t.water_mass_error_liters(),before);
+    }
+    #[test]
     fn finite_percolation_moves_water_to_groundwater() {
         let mut t=Terrain::new();
         let x=WORLD_SIZE/2;let y=WORLD_SIZE/2;
         t.update_soil_column((x,y),SoilColumn {
             moisture_l:250,groundwater_l:0,
             infiltration_remainder:0.0,percolation_remainder:0.0,
+            spring_remainder:0.0,
         });
         t.soil.activate((x,y));
         let before=t.water_mass_error_liters();
