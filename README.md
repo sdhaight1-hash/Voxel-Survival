@@ -31,6 +31,7 @@ Debug builds also work with `cargo run`, but initial terrain meshing is signific
 | Right click | Place selected block |
 | 1 / 2 / 3 | Select dirt / grass / stone |
 | Escape | Release mouse |
+| **F1** | Cycle lab time speed: 1x → 10x → 100x → 1000x → 1x |
 
 ## On-screen HUD
 
@@ -47,6 +48,20 @@ Debug builds also work with `cargo run`, but initial terrain meshing is signific
   is the average game-frame duration, not GPU-only render duration.
 
 The first click captures the mouse; subsequent clicks edit blocks. Maximum reach is 6 meters. Blocks can now be placed into water by conservatively displacing its stored liters into reachable space; placement is refused if the volume cannot be accommodated. Solid blocks can be mined through water.
+
+## Lab time acceleration
+
+Press **F1** (once per keypress) to cycle the accelerated day/night and
+climate clock: **1x**, **10x**, **100x**, **1000x**. The top-right HUD shows the
+current multiplier, day number and local solar time. At 100x the original
+20-minute day takes about **12 real seconds**; at 1000x it takes **1.2 seconds**.
+
+This is a **lab-only time control**, not player movement or fluid-solver
+acceleration. The existing 120 Hz movement and current finite-water update
+remain on stable real-time steps. The local thermal model uses accelerated
+climatic time with bounded substeps. Evaporation, groundwater and regional
+weather are not yet running automatically; future implementations must
+explicitly consume the accelerated climate clock and use stable substeps.
 
 ## World rules
 
