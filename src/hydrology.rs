@@ -307,11 +307,16 @@ impl Terrain {
             let &(low,low_head,low_amount)=free_surfaces.first().unwrap();
             let &(high,high_head,high_amount)=free_surfaces.last().unwrap();
             if high_head-low_head<=0.001 || high==low {continue;}
+            let receiver=if low_amount==CAPACITY_L {
+                (low.0,low.1,low.2+1)
+            } else {low};
+            let available=CAPACITY_L-self.water_liters(receiver.0,receiver.1,receiver.2);
             let moved=((high_head-low_head)*125.0).ceil() as u16;
-            let moved=moved.min(100).min(high_amount).min(CAPACITY_L-low_amount);
+            let moved=moved.min(100).min(high_amount).min(available);
             if moved==0 {continue;}
+            let recipient=self.water_liters(receiver.0,receiver.1,receiver.2);
             self.water_assign(high,high_amount-moved);
-            self.water_assign(low,low_amount+moved);
+            self.water_assign(receiver,recipient+moved);
             // Continue updating this pressure conduit while unequal; only
             // the root below terrain needs to remain a pressure seed.
             self.water.active.insert(start);
