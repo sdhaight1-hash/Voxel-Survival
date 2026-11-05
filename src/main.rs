@@ -677,7 +677,8 @@ impl Game {
             self.terrain.water_mass_error_liters()
                 +self.atmosphere.water_delta_kg().round() as i64,
             self.atmosphere.relative_humidity(sample.0,sample.1),
-            self.atmosphere.cells[atmosphere::Atmosphere::cell_index(sample.0,sample.1)].temperature_c);
+            self.atmosphere.cells[atmosphere::Atmosphere::cell_index(sample.0,sample.1)].temperature_c,
+            self.atmosphere.rain_delivered_liters,self.atmosphere.rain_unmet_liters);
         self.queue.write_texture(
             wgpu::ImageCopyTexture {
                 texture:&self.hud_texture,mip_level:0,
