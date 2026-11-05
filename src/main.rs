@@ -769,6 +769,7 @@ impl Game {
             self.soil_accumulator=0.0;
             self.soil_climate_seconds=0.0;
             self.terrain.step_soil(elapsed,4096);
+            self.terrain.step_groundwater(elapsed,4096);
             self.atmosphere.advance_af(elapsed);
             self.atmosphere.evaporate_near(
                 &mut self.terrain,
