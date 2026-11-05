@@ -24,6 +24,7 @@ impl Vertex {
 pub struct Mesh {
     pub vertices: Vec<Vertex>,
     pub indices: Vec<u32>,
+    pub water_index_start: u32,
     pub origin_x: i32,
     pub origin_y: i32,
 }
@@ -68,7 +69,8 @@ fn tile(b: Block, face: usize) -> u32 {
 pub fn build(t: &Terrain, center_x: i32, center_y: i32, radius: i32) -> Mesh {
     let origin_x = center_x.div_euclid(CHUNK_SIZE) * CHUNK_SIZE;
     let origin_y = center_y.div_euclid(CHUNK_SIZE) * CHUNK_SIZE;
-    let mut result = Mesh { vertices: Vec::new(), indices: Vec::new(), origin_x, origin_y };
+    let mut result = Mesh { vertices: Vec::new(), indices: Vec::new(), water_index_start: 0, origin_x, origin_y };
+    let mut water_indices = Vec::new();
     for cy in -radius..=radius {
         for cx in -radius..=radius {
             let base_x = origin_x + cx * CHUNK_SIZE;
@@ -83,11 +85,14 @@ pub fn build(t: &Terrain, center_x: i32, center_y: i32, radius: i32) -> Mesh {
                     max_height = max_height.max(h);
                 }
             }
+            // Keep edited underground tunnels visible without scanning the solid core.
+            let mut minimum_edit_z = WORLD_HEIGHT;
             // Include player-placed blocks above the original terrain surface.
             for (&(ex, ey, ez), _) in &t.edits {
                 if (0..CHUNK_SIZE).contains(&delta(ex, base_x))
                     && (0..CHUNK_SIZE).contains(&delta(ey, base_y)) {
                     max_height = max_height.max(ez);
+                    minimum_edit_z = minimum_edit_z.min(ez);
                 }
             }
             for ly in 0..32 {
@@ -95,15 +100,24 @@ pub fn build(t: &Terrain, center_x: i32, center_y: i32, radius: i32) -> Mesh {
                     let x = base_x + lx;
                     let y = base_y + ly;
                     let h = heights[(ly + 1) as usize][(lx + 1) as usize];
-                    // This is equivalent to traversing 32x32x32 sections in Z.
-                    for z in 0..=(max_height + 1).min(WORLD_HEIGHT - 1) {
+                    // Stone far below every exposed surface cannot contribute a face.
+                    // Keep a few subsurface layers and any edited underground cells.
+                    let lowest_neighbor = h
+                        .min(heights[ly as usize][(lx + 1) as usize])
+                        .min(heights[(ly + 2) as usize][(lx + 1) as usize])
+                        .min(heights[(ly + 1) as usize][lx as usize])
+                        .min(heights[(ly + 1) as usize][(lx + 2) as usize]);
+                    let start_z = (lowest_neighbor - 5).min(minimum_edit_z - 1).max(0);
+                    for z in start_z..=(max_height + 1).min(WORLD_HEIGHT - 1) {
                         let b = block(t, x, y, z, h);
                         if b == Block::Air { continue; }
                         for (face, &(dx,dy,dz)) in DIRECTIONS.iter().enumerate() {
                             let nh = heights[(ly + dy + 1) as usize][(lx + dx + 1) as usize];
                             let neighbor = block(t, x + dx, y + dy, z + dz, nh);
                             let visible = if b == Block::Water {
-                                neighbor == Block::Air
+                                // Only water's exposed upper surface: sides and bottoms
+                                // are not useful until transparent water volumes exist.
+                                face == 4 && neighbor == Block::Air
                             } else {
                                 neighbor == Block::Air || neighbor == Block::Water
                             };
@@ -119,12 +133,15 @@ pub fn build(t: &Terrain, center_x: i32, center_y: i32, radius: i32) -> Mesh {
                                     tile: tile(b, face),
                                 });
                             }
-                            result.indices.extend_from_slice(&[start,start+1,start+2,start,start+2,start+3]);
+                            let indices = if b == Block::Water { &mut water_indices } else { &mut result.indices };
+                            indices.extend_from_slice(&[start,start+1,start+2,start,start+2,start+3]);
                         }
                     }
                 }
             }
         }
     }
+    result.water_index_start = result.indices.len() as u32;
+    result.indices.extend(water_indices);
     result
 }

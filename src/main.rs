@@ -21,7 +21,10 @@ const EYE_HEIGHT: f32 = 1.18;
 
 #[repr(C)]
 #[derive(Copy, Clone, Pod, Zeroable)]
-struct CameraUniform { view_proj: [[f32; 4]; 4] }
+struct CameraUniform {
+    view_proj: [[f32; 4]; 4],
+    viewport: [f32; 4],
+}
 
 struct Player {
     pos: Vec3, // feet; Z up; X/Y wrap
@@ -148,6 +151,8 @@ struct Game {
     queue: wgpu::Queue,
     config: wgpu::SurfaceConfiguration,
     pipeline: wgpu::RenderPipeline,
+    water_pipeline: wgpu::RenderPipeline,
+    crosshair_pipeline: wgpu::RenderPipeline,
     depth: wgpu::TextureView,
     camera_buffer: wgpu::Buffer,
     camera_bind: wgpu::BindGroup,
@@ -155,6 +160,7 @@ struct Game {
     vertex_buffer: wgpu::Buffer,
     index_buffer: wgpu::Buffer,
     index_count: u32,
+    opaque_index_count: u32,
     mesh_origin: (i32, i32),
     terrain: Terrain,
     player: Player,
@@ -203,13 +209,16 @@ impl Game {
         });
         let camera_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("camera uniform"),
-            contents: bytemuck::bytes_of(&CameraUniform { view_proj: Mat4::IDENTITY.to_cols_array_2d() }),
+            contents: bytemuck::bytes_of(&CameraUniform {
+                view_proj: Mat4::IDENTITY.to_cols_array_2d(),
+                viewport: [size.width as f32, size.height as f32, 0.0, 0.0],
+            }),
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
         });
         let camera_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("camera layout"),
             entries: &[wgpu::BindGroupLayoutEntry {
-                binding: 0, visibility: wgpu::ShaderStages::VERTEX,
+                binding: 0, visibility: wgpu::ShaderStages::VERTEX_FRAGMENT,
                 ty: wgpu::BindingType::Buffer {
                     ty: wgpu::BufferBindingType::Uniform, has_dynamic_offset: false, min_binding_size: None,
                 }, count: None,
@@ -287,12 +296,72 @@ impl Game {
             }),
             multisample:Default::default(), multiview:None,
         });
+        let water_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label:Some("blended water"), layout:Some(&layout),
+            vertex:wgpu::VertexState {
+                module:&shader, entry_point:"vs_main", buffers:&[mesh::Vertex::layout()],
+                compilation_options:Default::default(),
+            },
+            fragment:Some(wgpu::FragmentState {
+                module:&shader,entry_point:"fs_water",
+                targets:&[Some(wgpu::ColorTargetState {
+                    format:config.format, blend:Some(wgpu::BlendState::ALPHA_BLENDING),
+                    write_mask:wgpu::ColorWrites::ALL,
+                })],compilation_options:Default::default(),
+            }),
+            primitive:wgpu::PrimitiveState {cull_mode:None,..Default::default()},
+            depth_stencil:Some(wgpu::DepthStencilState {
+                format:wgpu::TextureFormat::Depth24Plus, depth_write_enabled:false,
+                depth_compare:wgpu::CompareFunction::Less,
+                stencil:Default::default(), bias:Default::default(),
+            }),
+            multisample:Default::default(),multiview:None,
+        });
+        let crosshair_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label:Some("crosshair layout"),bind_group_layouts:&[&camera_layout],
+            push_constant_ranges:&[],
+        });
+        let crosshair_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label:Some("crosshair"),layout:Some(&crosshair_layout),
+            vertex:wgpu::VertexState {
+                module:&shader,entry_point:"vs_overlay",buffers:&[],
+                compilation_options:Default::default(),
+            },
+            fragment:Some(wgpu::FragmentState {
+                module:&shader,entry_point:"fs_crosshair",
+                targets:&[Some(wgpu::ColorTargetState {
+                    format:config.format, blend:Some(wgpu::BlendState::ALPHA_BLENDING),
+                    write_mask:wgpu::ColorWrites::ALL,
+                })],compilation_options:Default::default(),
+            }),
+            primitive:Default::default(),depth_stencil:None,
+            multisample:Default::default(),multiview:None,
+        });
         let terrain = Terrain::new();
         let spawn_x = WORLD_SIZE as f32 / 2.0;
         let spawn_y = WORLD_SIZE as f32 / 2.0;
-        let spawn_z = terrain.height(spawn_x as i32, spawn_y as i32) as f32 + 2.0;
+        // Pick the closest dry ground within a 256 m square; no submerged start.
+        let mut spawn = (spawn_x as i32, spawn_y as i32);
+        let mut found = false;
+        for radius in 0i32..=8 {
+            for dy in -radius..=radius {
+                for dx in -radius..=radius {
+                    if dx.abs() != radius && dy.abs() != radius { continue; }
+                    let x = spawn_x as i32 + dx * 16;
+                    let y = spawn_y as i32 + dy * 16;
+                    if terrain.height(x, y) >= terrain::SEA_LEVEL + 3 {
+                        spawn = (x, y);
+                        found = true;
+                        break;
+                    }
+                }
+                if found { break; }
+            }
+            if found { break; }
+        }
+        let spawn_z = terrain.height(spawn.0, spawn.1).max(terrain::SEA_LEVEL) as f32 + 2.0;
         let player = Player {
-            pos:Vec3::new(spawn_x,spawn_y,spawn_z),
+            pos:Vec3::new(spawn.0 as f32,spawn.1 as f32,spawn_z),
             velocity_z:0.0, yaw:0.3,pitch:-0.2,grounded:false,
         };
         let placeholder = device.create_buffer(&wgpu::BufferDescriptor {
@@ -304,10 +373,11 @@ impl Game {
             label:Some("index placeholder"),size:4,usage:wgpu::BufferUsages::INDEX,mapped_at_creation:false,
         });
         let mut game = Self {
-            surface,device,queue,config,pipeline,
+            surface,device,queue,config,pipeline,water_pipeline,crosshair_pipeline,
             depth,
             camera_buffer,camera_bind,texture_bind,
             vertex_buffer:placeholder,index_buffer:index_placeholder,index_count:0,
+            opaque_index_count:0,
             mesh_origin:(0,0),terrain,player,selected:Block::Dirt,
             keys:HashSet::new(),mouse_captured:false,last_frame:Instant::now(),
         };
@@ -319,6 +389,7 @@ impl Game {
         let m = mesh::build(&self.terrain, self.player.pos.x as i32, self.player.pos.y as i32, VIEW_RADIUS);
         self.mesh_origin = (m.origin_x,m.origin_y);
         self.index_count = m.indices.len() as u32;
+        self.opaque_index_count = m.water_index_start;
         self.vertex_buffer = self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label:Some("visible voxel vertices"),contents:bytemuck::cast_slice(&m.vertices),
             usage:wgpu::BufferUsages::VERTEX,
@@ -350,7 +421,10 @@ impl Game {
         let view = Mat4::look_to_rh(local_eye,self.player.forward(),Vec3::Z);
         let aspect = self.config.width as f32 / self.config.height as f32;
         let proj = Mat4::perspective_rh(75.0_f32.to_radians(),aspect,0.05,400.0);
-        let uniform = CameraUniform {view_proj:(proj*view).to_cols_array_2d()};
+        let uniform = CameraUniform {
+            view_proj:(proj*view).to_cols_array_2d(),
+            viewport:[self.config.width as f32,self.config.height as f32,0.0,0.0],
+        };
         self.queue.write_buffer(&self.camera_buffer,0,bytemuck::bytes_of(&uniform));
     }
     fn edit(&mut self, button:MouseButton) {
@@ -398,7 +472,17 @@ impl Game {
             pass.set_bind_group(1,&self.texture_bind,&[]);
             pass.set_vertex_buffer(0,self.vertex_buffer.slice(..));
             pass.set_index_buffer(self.index_buffer.slice(..),wgpu::IndexFormat::Uint32);
-            pass.draw_indexed(0..self.index_count,0,0..1);
+            pass.draw_indexed(0..self.opaque_index_count,0,0..1);
+            pass.set_pipeline(&self.water_pipeline);
+            pass.draw_indexed(self.opaque_index_count..self.index_count,0,0..1);
+            pass.set_pipeline(&self.crosshair_pipeline);
+            pass.set_bind_group(0,&self.camera_bind,&[]);
+            pass.set_scissor_rect(
+                self.config.width.saturating_sub(20)/2,
+                self.config.height.saturating_sub(20)/2,
+                20.min(self.config.width),20.min(self.config.height),
+            );
+            pass.draw(0..3,0..1);
         }
         self.queue.submit(Some(encoder.finish()));
         frame.present();
@@ -472,4 +556,17 @@ fn main() {
             _ => {}
         }
     }).expect("Run event loop");
+}
+
+#[cfg(test)]
+mod shader_tests {
+    #[test]
+    fn shader_parses_and_validates() {
+        let module = naga::front::wgsl::parse_str(include_str!("shader.wgsl"))
+            .expect("WGSL shader syntax");
+        naga::valid::Validator::new(
+            naga::valid::ValidationFlags::all(),
+            naga::valid::Capabilities::all(),
+        ).validate(&module).expect("WGSL shader validation");
+    }
 }
