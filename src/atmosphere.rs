@@ -96,7 +96,8 @@ impl Atmosphere {
                 let rh=self.relative_humidity(x,y).clamp(0.0,1.5);
                 let demand=((1.0-rh)/0.25).clamp(0.0,2.5)
                     *((temp-5.0)/22.0).clamp(0.0,2.0);
-                if let Some(wet)=t.exposed_surface_cell(x,y) {
+                let exposed=t.exposed_surface_cell(x,y);
+                if let Some(wet)=exposed {
                     // Illustrative 4 mm/day potential evaporation for wet
                     // tropical exposed water, scaled by vapor deficit/heat.
                     let fractional=4.0*demand*dt_seconds/86_400.0
@@ -118,7 +119,9 @@ impl Atmosphere {
                     +self.soil_evap_remainder.get(&key).copied().unwrap_or(0.0);
                 let requested=(soil_fractional.floor().max(0.0) as u32)
                     .min(u16::MAX as u32) as u16;
-                let moved=t.withdraw_soil_evaporation(x,y,requested);
+                let moved=if exposed.is_none() {
+                    t.withdraw_soil_evaporation(x,y,requested)
+                } else {0};
                 if moved>0 {
                     self.cells[idx].vapor_kg+=moved as f64;
                     total+=moved as u32;
@@ -206,10 +209,10 @@ mod tests {
         t.water_assign((x,y,bed),150);
         let total_before=t.water_mass_error_liters() as f64+a.water_delta_kg();
         let water_before=t.water_liters(x,y,bed);
-        let soil_before=t.soil_moisture_liters(x,y);
+        let soil_before=t.soil_moisture_liters(x+1,y);
         a.evaporate_near(&mut t,x,y,3.0*86_400.0);
         assert!(t.water_liters(x,y,bed)<water_before);
-        assert!(t.soil_moisture_liters(x,y)<soil_before);
+        assert!(t.soil_moisture_liters(x+1,y)<soil_before);
         let total_after=t.water_mass_error_liters() as f64+a.water_delta_kg();
         assert!((total_after-total_before).abs()<0.001);
     }
