@@ -30,7 +30,7 @@ pub fn longitude_degrees(x:f32) -> f64 {
 pub fn latitude_degrees(y:f32) -> f64 {
     // Periodic virtual latitude, used by the climate simulator.
     // This is NOT spherical geographic latitude.
-    (((y as f64 / WORLD_SIZE as f64)*TAU).sin()).asin().to_degrees()
+    (-((y as f64 / WORLD_SIZE as f64)*TAU).sin()).asin().to_degrees()
 }
 
 fn pixel(out:&mut [u8],x:i32,y:i32,color:[u8;4]) {
@@ -117,7 +117,10 @@ mod tests {
         assert!((longitude_degrees(half+100.0)-longitude_degrees(half)
                 -360.0*100.0/WORLD_SIZE as f64).abs()<0.00001);
         assert!((latitude_degrees(0.0)-latitude_degrees(WORLD_SIZE as f32)).abs()<1e-10);
-        assert!(latitude_degrees(WORLD_SIZE as f32/4.0)>89.99);
+        assert!(latitude_degrees(WORLD_SIZE as f32/4.0)<-89.99);
+        assert!(latitude_degrees(WORLD_SIZE as f32*0.5+10_000.0)>0.0);
+        assert!(latitude_degrees(WORLD_SIZE as f32*0.5-10_000.0)<0.0);
+        assert!(latitude_degrees(WORLD_SIZE as f32*0.5).abs()<0.000001);
     }
     #[test]
     fn atlas_is_rgba_and_nonempty() {
