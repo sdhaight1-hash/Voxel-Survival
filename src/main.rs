@@ -1,5 +1,7 @@
 mod mesh;
 mod terrain;
+mod hydrology;
+mod geoscience;
 
 use std::{collections::HashSet, sync::Arc, time::Instant};
 use bytemuck::{Pod, Zeroable};
@@ -207,6 +209,7 @@ struct Game {
     mouse_captured: bool,
     last_frame: Instant,
     physics_accumulator: f32,
+    water_accumulator: f32,
 }
 
 fn depth_view(device: &wgpu::Device, size: PhysicalSize<u32>) -> wgpu::TextureView {
@@ -427,7 +430,7 @@ impl Game {
             vertex_buffer:placeholder,index_buffer:index_placeholder,index_count:0,
             opaque_index_count:0,
             mesh_origin:(0,0),terrain,player,selected:Block::Dirt,
-            keys:HashSet::new(),mouse_captured:false,last_frame:Instant::now(),physics_accumulator:0.0,
+            keys:HashSet::new(),mouse_captured:false,last_frame:Instant::now(),physics_accumulator:0.0,water_accumulator:0.0,
         };
         game.rebuild();
         game
@@ -465,6 +468,13 @@ impl Game {
             self.physics_accumulator -= PHYSICS_DT;
             ticks += 1;
         }
+        // Fluid runs at a lower fixed rate than player physics. Only active
+        // cells are visited; calm ocean cells do not update every tick.
+        self.water_accumulator += frame_dt;
+        if self.water_accumulator >= 0.2 {
+            self.water_accumulator = 0.0;
+            if self.terrain.step_water(4096) > 0 {self.rebuild();}
+        }
         let cx = (self.player.pos.x as i32).div_euclid(32) * 32;
         let cy = (self.player.pos.y as i32).div_euclid(32) * 32;
         if (cx,cy) != self.mesh_origin { self.rebuild(); }
@@ -487,7 +497,9 @@ impl Game {
                 MouseButton::Left => self.terrain.set(hit.0,hit.1,hit.2,Block::Air),
                 MouseButton::Right => {
                     let old = self.terrain.block(empty.0,empty.1,empty.2);
-                    if old == Block::Air || old == Block::Water {
+                    // Until displacement is implemented, never delete finite
+                    // water volume when placing a block.
+                    if old == Block::Air {
                         self.terrain.set(empty.0,empty.1,empty.2,self.selected);
                         if collides(&self.terrain,self.player.pos) {
                             self.terrain.set(empty.0,empty.1,empty.2,old);
