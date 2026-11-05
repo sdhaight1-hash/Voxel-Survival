@@ -68,7 +68,7 @@ fn block(t: &Terrain, x:i32, y:i32, z:i32, height:i32) -> Block {
     // Excavated air starts dry regardless of elevation.
     if t.edits.contains_key(&cell) {return Block::Air;}
     if z>height {
-        if z<=t.initial_water_surface(x,y) {Block::Water} else {Block::Air}
+        if z<t.initial_water_surface(x,y) {Block::Water} else {Block::Air}
     } else if z==height {
         if height<SEA_LEVEL {Block::Dirt} else {Block::Grass}
     } else if z>=height-3 {Block::Dirt}
