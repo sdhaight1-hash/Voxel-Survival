@@ -28,14 +28,14 @@ Debug builds also work with `cargo run`, but initial terrain meshing is signific
 ## On-screen HUD
 
 - **Top-right:** averaged frames per second (FPS), mean milliseconds per frame,
-  and XYZ positions in **meters relative to the map center**, not the spawn
+  and XYZ positions in **whole meters relative to the map center**, not the spawn
   point. The center of the 1,024 km torus reads X=0 and Y=0; Z remains height
-  above the voxel world's vertical origin.
+  above the voxel world's vertical origin. Physics and collision retain fractional\n  coordinates internally in double precision; GPU terrain positions stay\n  small, relative to nearby chunks.
 - **Top-center:** scrolling direction compass (N/NE/E/SE/S/SW/W/NW) with
-  heading in degrees, and a *virtual* latitude/longitude readout directly
+  heading in rounded whole degrees (000° is true north), and a *virtual* latitude/longitude readout directly
   underneath. Longitude uses the centered X axis mapped to [-180°,180°).
   The map center is the conceptual Equator/Prime Meridian crossing (0°,0°); north is positive virtual latitude, east is positive longitude. Latitude uses periodic toroidal climate bands and
-  **not geographic latitude on a spherical planet**.
+  **not geographic latitude on a spherical planet**. Virtual latitude and\n  longitude display two decimal places.
 - Readouts refresh approximately ten times a second to reduce texture uploads; frame time
   is the average game-frame duration, not GPU-only render duration.
 
