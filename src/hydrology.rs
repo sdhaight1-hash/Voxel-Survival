@@ -334,6 +334,28 @@ impl Terrain {
         transfers
     }
 
+    /// Top of a contiguous open-water column for rendering/evaporation.
+    /// An underground cave or floating liquid cell is not surface water.
+    pub(crate) fn exposed_surface_cell(&self,x:i32,y:i32)->Option<Cell> {
+        let (x,y)=(wrap(x),wrap(y));
+        let col=self.surface_column(x,y);
+        if col.blocked || col.liters==0 {return None;}
+        let z=col.bed+((col.liters-1)/CAPACITY_L as u32) as i32;
+        if z>=WORLD_HEIGHT || self.water_liters(x,y,z)==0
+            || self.block(x,y,z+1)!=Block::Air {return None;}
+        Some((x,y,z))
+    }
+
+    /// Remove surface water for transfer into a spatial atmosphere.
+    /// Unlike the legacy evaporate() API, it does not use the single global
+    /// atmosphere counter. The caller must credit the regional vapor store.
+    pub(crate) fn withdraw_surface_evaporation(&mut self,at:Cell,requested:u16)->u16 {
+        let current=self.water_liters(at.0,at.1,at.2);
+        let moved=current.min(requested);
+        if moved>0 {self.water_assign(at,current-moved);}
+        moved
+    }
+
     /// Move existing mass, never synthesize water when a cavity is excavated.
     fn transfer(&mut self, from:Cell, to:Cell, limit:u16) -> u16 {
         let from=canonical(from);
