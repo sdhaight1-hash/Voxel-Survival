@@ -557,3 +557,16 @@ fn main() {
         }
     }).expect("Run event loop");
 }
+
+#[cfg(test)]
+mod shader_tests {
+    #[test]
+    fn shader_parses_and_validates() {
+        let module = naga::front::wgsl::parse_str(include_str!("shader.wgsl"))
+            .expect("WGSL shader syntax");
+        naga::valid::Validator::new(
+            naga::valid::ValidationFlags::all(),
+            naga::valid::Capabilities::all(),
+        ).validate(&module).expect("WGSL shader validation");
+    }
+}
