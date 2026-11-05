@@ -1,6 +1,7 @@
 use noise::{NoiseFn, Perlin};
 use std::collections::HashMap;
 use crate::hydrology::WaterState;
+use crate::soil::SoilState;
 
 pub const WORLD_SIZE: i32 = 1_024; // Hydrology lab only; main remains 1,024,000.
 pub const WORLD_HEIGHT: i32 = 256;
@@ -32,9 +33,10 @@ pub struct Terrain {
     noise: Perlin,
     pub(crate) edits: HashMap<(i32, i32, i32), Block>,
     pub(crate) water: WaterState,
+    pub(crate) soil: SoilState,
 }
 impl Terrain {
-    pub fn new() -> Self { Self { noise: Perlin::new(42), edits: HashMap::new(), water: WaterState::default() } }
+    pub fn new() -> Self { Self { noise: Perlin::new(42), edits: HashMap::new(), water: WaterState::default(), soil:SoilState::default() } }
 
     // Coordinates below use toroidal *meters* relative to the map center.
     // The lab is deliberately authored for testable waterways; production
@@ -136,6 +138,7 @@ impl Terrain {
             let cell=(wrap(x),wrap(y),z);
             self.edits.insert(cell,block);
             self.water.activate(cell);
+            self.soil.activate((cell.0,cell.1));
         }
     }
 
