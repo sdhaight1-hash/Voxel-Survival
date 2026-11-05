@@ -13,6 +13,14 @@ const AREA_M2:f64=(REGION_SIZE_M*REGION_SIZE_M) as f64;
 const LAYER_HEIGHT_M:f64=2000.0;
 const AIR_MASS_KG:f64=AREA_M2*LAYER_HEIGHT_M*1.18;
 const PRESSURE_PA:f64=101_325.0;
+const MONTH_SECONDS:f64=10.0*86_400.0;
+
+#[derive(Clone,Debug)]
+struct RainGauge {
+    year:u64,
+    monthly_mm:[u32;12],
+}
+
 
 #[derive(Clone,Copy,Debug)]
 pub struct AirCell {
@@ -30,6 +38,7 @@ pub struct Atmosphere {
     surface_evap_remainder:HashMap<(i32,i32),f64>,
     soil_evap_remainder:HashMap<(i32,i32),f64>,
     rain_remainder:HashMap<(i32,i32),f64>,
+    rain_gauges:HashMap<(i32,i32),RainGauge>,
     /// Actually deposited liters, not an assumed Af climate target.
     pub rain_delivered_liters:u64,
     /// Requested storm liters that could not be delivered from finite cloud
@@ -57,6 +66,7 @@ impl Atmosphere {
             surface_evap_remainder:HashMap::new(),
             soil_evap_remainder:HashMap::new(),
             rain_remainder:HashMap::new(),
+            rain_gauges:HashMap::new(),
             rain_delivered_liters:0,
             rain_unmet_liters:0,
         }
@@ -161,6 +171,14 @@ impl Atmosphere {
     /// cloud water becomes explicit unmet demand rather than invented rain.
     /// The rest of the island is NOT yet covered; a regional catchment
     /// deposition model is required before validating island-wide Af totals.
+    /// Actual measured millimeters received by a 1m2 rain gauge, for one
+    /// of 12 consecutive 10-day climate months in its latest recorded year.
+    /// Unvisited cells return None: they have NOT been climate-simulated.
+    pub fn rain_gauge_mm(&self,x:i32,y:i32,month:usize)->Option<u32> {
+        if month>=12 {return None;}
+        self.rain_gauges.get(&(wrap(x),wrap(y))).map(|g|g.monthly_mm[month])
+    }
+
     pub fn rain_near(&mut self,t:&mut Terrain,px:i32,py:i32,dt_seconds:f64)->u32 {
         if dt_seconds<=0.0 {return 0;}
         let from=(self.time_seconds-dt_seconds).max(0.0);
@@ -170,32 +188,48 @@ impl Atmosphere {
             for dx in -6..=6 {
                 let x=wrap(px+dx);let y=wrap(py+dy);
                 let idx=Self::cell_index(x,y);
-                // Different weather regions experience storms at different
-                // phases. Cells inside the same 64m region share the clock.
                 let offset=(idx as u64*24_791%172_800) as f64;
-                let wet=(Self::storm_cumulative_seconds(to+offset)
-                    -Self::storm_cumulative_seconds(from+offset)).max(0.0);
                 let key=(x,y);
-                let fractional=30.0*wet/86_400.0
-                    +self.rain_remainder.get(&key).copied().unwrap_or(0.0);
-                let requested=(fractional.floor().max(0.0) as u32)
-                    .min(u16::MAX as u32) as u16;
-                if requested==0 {
-                    self.rain_remainder.insert(key,fractional);
-                    continue;
+                let mut remainder=self.rain_remainder.get(&key).copied().unwrap_or(0.0);
+                let mut segment_start=from;
+                // Split intervals at climate-month boundaries. A fast F1
+                // update must never misattribute rain to the next month.
+                while segment_start<to {
+                    let month_serial=(segment_start/MONTH_SECONDS).floor() as u64;
+                    let month_end=(month_serial+1) as f64*MONTH_SECONDS;
+                    let segment_end=to.min(month_end);
+                    if segment_end<=segment_start {break;}
+                    let wet=(Self::storm_cumulative_seconds(segment_end+offset)
+                        -Self::storm_cumulative_seconds(segment_start+offset)).max(0.0);
+                    let desired=30.0*wet/86_400.0+remainder;
+                    let requested=desired.floor().max(0.0).min(u16::MAX as f64) as u16;
+                    remainder=desired-requested as f64;
+                    if requested>0 {
+                        let available=self.cells[idx].cloud_kg.floor().max(0.0)
+                            .min(u16::MAX as f64) as u16;
+                        let accepted=t.receive_precipitation(x,y,requested.min(available));
+                        // Exact cloud debit for each liter credited to terrain.
+                        self.cells[idx].cloud_kg-=accepted as f64;
+                        self.rain_delivered_liters+=accepted as u64;
+                        self.rain_unmet_liters+=(requested-accepted) as u64;
+                        total+=accepted as u32;
+                        if accepted>0 {
+                            let year=month_serial/12;
+                            let gauge=self.rain_gauges.entry(key).or_insert(RainGauge {
+                                year,monthly_mm:[0;12],
+                            });
+                            if gauge.year!=year {
+                                gauge.year=year;
+                                gauge.monthly_mm=[0;12];
+                            }
+                            gauge.monthly_mm[(month_serial%12) as usize]+=accepted as u32;
+                        }
+                    }
+                    segment_start=segment_end;
                 }
-                let available=self.cells[idx].cloud_kg.floor().max(0.0)
-                    .min(u16::MAX as f64) as u16;
-                let accepted=t.receive_precipitation(x,y,requested.min(available));
-                // Each accepted liter is debited immediately from cloud
-                // storage, with the matching credit in terrain's ledger.
-                self.cells[idx].cloud_kg-=accepted as f64;
-                self.rain_delivered_liters+=accepted as u64;
-                self.rain_unmet_liters+=(requested-accepted) as u64;
-                total+=accepted as u32;
-                // Do not carry unsatisfied demand into a perpetual drizzle.
-                // Only the <1L discretization remainder survives a tick.
-                self.rain_remainder.insert(key,fractional-requested as f64);
+                // Carry only fractional discretization; shortages were
+                // explicitly counted instead of deferred or invented.
+                self.rain_remainder.insert(key,remainder);
             }
         }
         total
@@ -344,6 +378,19 @@ mod tests {
         a.rain_near(&mut t,x,y,10.0*86_400.0);
         assert!(a.rain_unmet_liters>0,
             "finite cloud supply must report the unmet Af forcing target");
+    }
+    #[test]
+    fn rainfall_gauges_account_for_month_boundaries_across_fast_steps() {
+        let mut t=Terrain::new();let mut a=Atmosphere::new_af();
+        let (x,y)=(WORLD_SIZE/2+32,WORLD_SIZE/2+32);
+        a.cells[Atmosphere::cell_index(x,y)].cloud_kg=50_000.0;
+        a.time_seconds=20.0*86_400.0;
+        a.rain_near(&mut t,x,y,20.0*86_400.0);
+        assert_eq!(a.rain_gauge_mm(x,y,0),Some(75));
+        assert_eq!(a.rain_gauge_mm(x,y,1),Some(75));
+        assert_eq!(a.rain_gauge_mm(x,y,2),Some(0));
+        assert_eq!(a.rain_delivered_liters,169*150);
+        assert_eq!(a.rain_unmet_liters,0);
     }
     #[test]
     fn storm_depth_is_invariant_to_climate_substep_size() {
