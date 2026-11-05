@@ -5,7 +5,7 @@ use std::f64::consts::{PI, TAU};
 use crate::terrain::WORLD_SIZE;
 
 pub const WIDTH: u32 = 768;
-pub const HEIGHT: u32 = 92;
+pub const HEIGHT: u32 = 124;
 const COMPASS_W: i32 = 416;
 const INFO_X: i32 = 416;
 const PANEL_BG: [u8;4] = [8,18,24,178];
@@ -84,7 +84,8 @@ fn compass(out:&mut [u8],heading:f64) {
     centered_text(out,COMPASS_W/2,48,&format!("{:03} deg",heading as i32),WHITE,1);
 }
 pub fn rasterize(yaw:f32,x:f64,y:f64,z:f64,fps:f32,frame_ms:f32,
-    time_scale:u32, world_time_seconds:f64) -> Vec<u8> {
+    time_scale:u32, world_time_seconds:f64, water_liters:u16,
+    active_cells:usize, surface_delta_liters:i64, atmosphere_liters:u64) -> Vec<u8> {
     let mut out=vec![0u8;(WIDTH*HEIGHT*4) as usize];
     compass(&mut out,heading_degrees(yaw));
     fill(&mut out,INFO_X,0,320,HEIGHT as i32,PANEL_BG);
@@ -98,6 +99,11 @@ pub fn rasterize(yaw:f32,x:f64,y:f64,z:f64,fps:f32,frame_ms:f32,
     text(&mut out,INFO_X+12,66,
         &format!("F1 {:>4}x DAY {} {:02}:{:02}",time_scale,day,minutes/60,minutes%60),
         ACCENT,1);
+    text(&mut out,INFO_X+12,85,
+        &format!("WATER {:04}L   ACTIVE {}",water_liters,active_cells),WHITE,1);
+    text(&mut out,INFO_X+12,103,
+        &format!("DELTA {:+}L  AIR {}L",surface_delta_liters,atmosphere_liters),
+        MUTED,1);
     centered_text(&mut out,COMPASS_W/2,68,
         &format!("V-LAT {:+6.2}  LON {:+7.2}",latitude_degrees(y),longitude_degrees(x)),
         MUTED,1);
@@ -132,8 +138,8 @@ mod tests {
     }
     #[test]
     fn lab_time_is_visible_and_updates_in_hud() {
-        let normal=rasterize(0.0,512.0,512.0,128.0,60.0,16.7,1,0.0);
-        let fast=rasterize(0.0,512.0,512.0,128.0,60.0,16.7,100,1200.0);
+        let normal=rasterize(0.0,512.0,512.0,128.0,60.0,16.7,1,0.0,0,0,0,0);
+        let fast=rasterize(0.0,512.0,512.0,128.0,60.0,16.7,100,1200.0,0,0,0,0);
         assert_ne!(normal,fast,"HUD must visibly reflect F1 rate and elapsed days");
         assert_eq!(normal.len(),(WIDTH*HEIGHT*4) as usize);
     }
