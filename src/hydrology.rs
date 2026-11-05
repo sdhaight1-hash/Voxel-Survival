@@ -684,6 +684,31 @@ mod tests {
             "pressure exchange must conserve every liter");
     }
     #[test]
+    #[ignore = "manual diagnostic; do not assert runner-dependent timing"]
+    fn hydrology_lab_perf_measurement() {
+        use std::time::Instant;
+        let mut calm=Terrain::new();
+        calm.water.activate((0,0,109));
+        let start=Instant::now();
+        for _ in 0..1000 {calm.step_water(4096);}
+        let calm_ms=start.elapsed().as_secs_f64()*1000.0/1000.0;
+        let mut disturbed=Terrain::new();
+        let lake=(WORLD_SIZE/2-115,WORLD_SIZE/2+125,125);
+        disturbed.water_assign(lake,900);
+        let mass=disturbed.water.surface_delta_liters;
+        let start=Instant::now();
+        let mut transfers=0usize;
+        let mut dirty=0usize;
+        for _ in 0..1000 {
+            transfers+=disturbed.step_water(4096);
+            dirty+=disturbed.take_water_dirty().len();
+        }
+        let active_ms=start.elapsed().as_secs_f64()*1000.0/1000.0;
+        assert_eq!(disturbed.water.surface_delta_liters,mass);
+        eprintln!("hydrology bench: calm={:.3} ms/tick active={:.3} ms/tick transfers={} dirty_cells={}",
+            calm_ms,active_ms,transfers,dirty);
+    }
+    #[test]
     fn water_transfers_conserve_local_mass_and_wrap() {
         let mut t=Terrain::new();
         let from=(WORLD_SIZE-1,0,240);
