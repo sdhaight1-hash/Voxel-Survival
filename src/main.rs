@@ -3,7 +3,7 @@ mod terrain;
 mod hydrology;
 mod geoscience;
 
-use std::{collections::HashSet, sync::Arc, time::Instant};
+use std::{collections::{HashMap,HashSet}, sync::Arc, time::Instant};
 use bytemuck::{Pod, Zeroable};
 use glam::{Mat4, Vec3};
 use terrain::{Block, Terrain, WORLD_SIZE, WORLD_HEIGHT};
@@ -185,6 +185,14 @@ fn texture_pixels() -> Vec<u8> {
     pixels
 }
 
+struct ChunkGpu {
+    origin: (i32,i32),
+    vertices: wgpu::Buffer,
+    indices: wgpu::Buffer,
+    opaque_count: u32,
+    count: u32,
+}
+
 struct Game {
     surface: wgpu::Surface<'static>,
     device: wgpu::Device,
@@ -197,10 +205,8 @@ struct Game {
     camera_buffer: wgpu::Buffer,
     camera_bind: wgpu::BindGroup,
     texture_bind: wgpu::BindGroup,
-    vertex_buffer: wgpu::Buffer,
-    index_buffer: wgpu::Buffer,
-    index_count: u32,
-    opaque_index_count: u32,
+    chunks: Vec<ChunkGpu>,
+    chunk_offsets: wgpu::Buffer,
     mesh_origin: (i32, i32),
     terrain: Terrain,
     player: Player,
@@ -321,7 +327,7 @@ impl Game {
         let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
             label:Some("voxel pipeline"), layout:Some(&layout),
             vertex:wgpu::VertexState {
-                module:&shader, entry_point:"vs_main", buffers:&[mesh::Vertex::layout()],
+                module:&shader, entry_point:"vs_main", buffers:&[mesh::Vertex::layout(),mesh::ChunkOffset::layout()],
                 compilation_options:Default::default(),
             },
             fragment:Some(wgpu::FragmentState {
@@ -341,7 +347,7 @@ impl Game {
         let water_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
             label:Some("blended water"), layout:Some(&layout),
             vertex:wgpu::VertexState {
-                module:&shader, entry_point:"vs_main", buffers:&[mesh::Vertex::layout()],
+                module:&shader, entry_point:"vs_main", buffers:&[mesh::Vertex::layout(),mesh::ChunkOffset::layout()],
                 compilation_options:Default::default(),
             },
             fragment:Some(wgpu::FragmentState {
@@ -415,20 +421,16 @@ impl Game {
             pos:Vec3::new(spawn.0 as f32,spawn.1 as f32,spawn_z),
             velocity_z:0.0, yaw:0.3,pitch:-0.2,grounded:false,
         };
-        let placeholder = device.create_buffer(&wgpu::BufferDescriptor {
-            label:Some("placeholder"),size:4,usage:wgpu::BufferUsages::VERTEX|wgpu::BufferUsages::INDEX,
-            mapped_at_creation:false,
-        });
         let depth = depth_view(&device,size);
-        let index_placeholder = device.create_buffer(&wgpu::BufferDescriptor {
-            label:Some("index placeholder"),size:4,usage:wgpu::BufferUsages::INDEX,mapped_at_creation:false,
+        let chunk_offsets = device.create_buffer(&wgpu::BufferDescriptor {
+            label:Some("chunk offset placeholder"),size:8,
+            usage:wgpu::BufferUsages::VERTEX,mapped_at_creation:false,
         });
         let mut game = Self {
             surface,device,queue,config,pipeline,water_pipeline,crosshair_pipeline,
             depth,
             camera_buffer,camera_bind,texture_bind,
-            vertex_buffer:placeholder,index_buffer:index_placeholder,index_count:0,
-            opaque_index_count:0,
+            chunks:Vec::new(),chunk_offsets,
             mesh_origin:(0,0),terrain,player,selected:Block::Dirt,
             keys:HashSet::new(),mouse_captured:false,last_frame:Instant::now(),physics_accumulator:0.0,water_accumulator:0.0,
         };
@@ -436,19 +438,70 @@ impl Game {
         game
     }
 
+    fn gpu_chunk(&self,x:i32,y:i32) -> ChunkGpu {
+        let mesh=mesh::build(&self.terrain,x,y,0);
+        ChunkGpu {
+            origin:(terrain::wrap(x),terrain::wrap(y)),
+            opaque_count:mesh.water_index_start,
+            count:mesh.indices.len() as u32,
+            vertices:self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label:Some("chunk vertices"),
+                contents:bytemuck::cast_slice(&mesh.vertices),
+                usage:wgpu::BufferUsages::VERTEX,
+            }),
+            indices:self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label:Some("chunk indices"),
+                contents:bytemuck::cast_slice(&mesh.indices),
+                usage:wgpu::BufferUsages::INDEX,
+            }),
+        }
+    }
+
+    // Keeps already generated chunks and builds only the new edge when crossing
+    // a 32m chunk boundary (7 instead of 49 chunk columns in the common case).
     fn rebuild(&mut self) {
-        let m = mesh::build(&self.terrain, self.player.pos.x as i32, self.player.pos.y as i32, VIEW_RADIUS);
-        self.mesh_origin = (m.origin_x,m.origin_y);
-        self.index_count = m.indices.len() as u32;
-        self.opaque_index_count = m.water_index_start;
-        self.vertex_buffer = self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-            label:Some("visible voxel vertices"),contents:bytemuck::cast_slice(&m.vertices),
+        let cx=(self.player.pos.x.floor() as i32).div_euclid(32)*32;
+        let cy=(self.player.pos.y.floor() as i32).div_euclid(32)*32;
+        self.mesh_origin=(cx,cy);
+        let mut previous:HashMap<(i32,i32),ChunkGpu>=
+            std::mem::take(&mut self.chunks).into_iter()
+                .map(|chunk|(chunk.origin,chunk)).collect();
+        for dy in -VIEW_RADIUS..=VIEW_RADIUS {
+            for dx in -VIEW_RADIUS..=VIEW_RADIUS {
+                let origin=(terrain::wrap(cx+dx*32),terrain::wrap(cy+dy*32));
+                let chunk=match previous.remove(&origin) {
+                    Some(chunk)=>chunk,
+                    None=>self.gpu_chunk(origin.0,origin.1),
+                };
+                self.chunks.push(chunk);
+            }
+        }
+        let offsets:Vec<mesh::ChunkOffset>=self.chunks.iter().map(|chunk| {
+            mesh::ChunkOffset {xy:[
+                terrain::delta(chunk.origin.0,cx) as f32,
+                terrain::delta(chunk.origin.1,cy) as f32,
+            ]}
+        }).collect();
+        self.chunk_offsets=self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label:Some("visible chunk offsets"),
+            contents:bytemuck::cast_slice(&offsets),
             usage:wgpu::BufferUsages::VERTEX,
         });
-        self.index_buffer = self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-            label:Some("visible voxel indices"),contents:bytemuck::cast_slice(&m.indices),
-            usage:wgpu::BufferUsages::INDEX,
-        });
+    }
+
+    // A changed voxel also affects visible faces across the adjacent border.
+    fn refresh_edited_chunks(&mut self, changed:&HashSet<(i32,i32,i32)>) {
+        let affected:Vec<(usize,i32,i32)>=self.chunks.iter().enumerate()
+            .filter(|(_,chunk)| changed.iter().any(|&(x,y,_)| {
+                let dx=terrain::delta(x,chunk.origin.0);
+                let dy=terrain::delta(y,chunk.origin.1);
+                (-1..=32).contains(&dx) && (-1..=32).contains(&dy)
+            }))
+            .map(|(index,chunk)|(index,chunk.origin.0,chunk.origin.1))
+            .collect();
+        for (index,x,y) in affected {
+            self.chunks[index]=self.gpu_chunk(x,y);
+        }
     }
     fn resize(&mut self, size:PhysicalSize<u32>) {
         if size.width == 0 || size.height == 0 { return; }
@@ -473,7 +526,9 @@ impl Game {
         self.water_accumulator += frame_dt;
         if self.water_accumulator >= 0.2 {
             self.water_accumulator = 0.0;
-            if self.terrain.step_water(4096) > 0 {self.rebuild();}
+            self.terrain.step_water(4096);
+            let dirty=self.terrain.take_water_dirty();
+            if !dirty.is_empty() {self.refresh_edited_chunks(&dirty);}
         }
         let cx = (self.player.pos.x as i32).div_euclid(32) * 32;
         let cy = (self.player.pos.y as i32).div_euclid(32) * 32;
@@ -508,7 +563,8 @@ impl Game {
                 }
                 _ => return,
             }
-            self.rebuild();
+            let changed=HashSet::from([hit,empty]);
+            self.refresh_edited_chunks(&changed);
         }
     }
     fn render(&mut self) -> Result<(),wgpu::SurfaceError> {
@@ -536,11 +592,23 @@ impl Game {
             pass.set_pipeline(&self.pipeline);
             pass.set_bind_group(0,&self.camera_bind,&[]);
             pass.set_bind_group(1,&self.texture_bind,&[]);
-            pass.set_vertex_buffer(0,self.vertex_buffer.slice(..));
-            pass.set_index_buffer(self.index_buffer.slice(..),wgpu::IndexFormat::Uint32);
-            pass.draw_indexed(0..self.opaque_index_count,0,0..1);
+            for (i,chunk) in self.chunks.iter().enumerate() {
+                if chunk.opaque_count==0 {continue;}
+                pass.set_vertex_buffer(0,chunk.vertices.slice(..));
+                let start=(i*8) as u64;
+                pass.set_vertex_buffer(1,self.chunk_offsets.slice(start..start+8));
+                pass.set_index_buffer(chunk.indices.slice(..),wgpu::IndexFormat::Uint32);
+                pass.draw_indexed(0..chunk.opaque_count,0,0..1);
+            }
             pass.set_pipeline(&self.water_pipeline);
-            pass.draw_indexed(self.opaque_index_count..self.index_count,0,0..1);
+            for (i,chunk) in self.chunks.iter().enumerate() {
+                if chunk.opaque_count==chunk.count {continue;}
+                pass.set_vertex_buffer(0,chunk.vertices.slice(..));
+                let start=(i*8) as u64;
+                pass.set_vertex_buffer(1,self.chunk_offsets.slice(start..start+8));
+                pass.set_index_buffer(chunk.indices.slice(..),wgpu::IndexFormat::Uint32);
+                pass.draw_indexed(chunk.opaque_count..chunk.count,0,0..1);
+            }
             pass.set_pipeline(&self.crosshair_pipeline);
             pass.set_bind_group(0,&self.camera_bind,&[]);
             pass.set_scissor_rect(
