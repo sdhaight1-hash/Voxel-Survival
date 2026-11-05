@@ -836,6 +836,15 @@ mod shader_tests {
             naga::valid::Capabilities::all(),
         ).validate(&module).expect("WGSL shader validation");
     }
+    #[test]
+    fn hud_shader_parses_and_validates() {
+        let module=naga::front::wgsl::parse_str(include_str!("hud.wgsl"))
+            .expect("HUD WGSL syntax");
+        naga::valid::Validator::new(
+            naga::valid::ValidationFlags::all(),naga::valid::Capabilities::all(),
+        ).validate(&module).expect("HUD shader validation");
+    }
+
 }
 
 #[cfg(test)]
