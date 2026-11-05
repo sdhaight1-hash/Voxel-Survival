@@ -1,5 +1,6 @@
 use noise::{NoiseFn, Perlin};
 use std::collections::HashMap;
+use std::cell::RefCell;
 use crate::hydrology::WaterState;
 use crate::soil::SoilState;
 
@@ -31,12 +32,15 @@ pub fn delta(n: i32, origin: i32) -> i32 {
 
 pub struct Terrain {
     noise: Perlin,
+    // Base height is immutable; repeated flow queries reuse this sample.
+    // Terrain edits remain separate and never invalidate procedural height.
+    height_cache:RefCell<HashMap<(i32,i32),i32>>,
     pub(crate) edits: HashMap<(i32, i32, i32), Block>,
     pub(crate) water: WaterState,
     pub(crate) soil: SoilState,
 }
 impl Terrain {
-    pub fn new() -> Self { Self { noise: Perlin::new(42), edits: HashMap::new(), water: WaterState::default(), soil:SoilState::default() } }
+    pub fn new() -> Self { Self { noise: Perlin::new(42), height_cache:RefCell::new(HashMap::new()), edits: HashMap::new(), water: WaterState::default(), soil:SoilState::default() } }
 
     // Coordinates below use toroidal *meters* relative to the map center.
     // The lab is deliberately authored for testable waterways; production
@@ -73,6 +77,8 @@ impl Terrain {
     }
 
     pub fn height(&self,x:i32,y:i32) -> i32 {
+        let key=(wrap(x),wrap(y));
+        if let Some(h)=self.height_cache.borrow().get(&key).copied() {return h;}
         let (x,y)=Self::lab_xy(x,y);
         let radius=x.hypot(y);
         // Broad coastal ramp: ~52m of rise spread across 240m, not the
@@ -112,7 +118,9 @@ impl Terrain {
             let blend=((1.5-swamp)/0.5).clamp(0.0,1.0);
             h=h*(1.0-blend)+h.min(bed)*blend;
         }
-        h.round().clamp(2.0,250.0) as i32
+        let result=h.round().clamp(2.0,250.0) as i32;
+        self.height_cache.borrow_mut().insert(key,result);
+        result
     }
 
     pub fn block(&self, x: i32, y: i32, z: i32) -> Block {
