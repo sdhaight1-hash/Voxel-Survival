@@ -300,11 +300,11 @@ impl Game {
             mapped_at_creation:false,
         });
         let depth = depth_view(&device,size);
-        let mut game = Self {
+        let index_placeholder = device.create_buffer(&wgpu::BufferDescriptor {\n            label:Some(\"index placeholder\"),size:4,usage:wgpu::BufferUsages::INDEX,mapped_at_creation:false,\n        });\n        let mut game = Self {
             surface,device,queue,config,pipeline,
             depth,
             camera_buffer,camera_bind,texture_bind,
-            vertex_buffer:placeholder.clone(),index_buffer:placeholder,index_count:0,
+            vertex_buffer:placeholder,index_buffer:index_placeholder,index_count:0,
             mesh_origin:(0,0),terrain,player,selected:Block::Dirt,
             keys:HashSet::new(),mouse_captured:false,last_frame:Instant::now(),
         };
