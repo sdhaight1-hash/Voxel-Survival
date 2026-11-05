@@ -102,7 +102,10 @@ pub fn build(t: &Terrain, center_x: i32, center_y: i32, radius: i32) -> Mesh {
                 for lx in -1..=32 {
                     let h = t.height(base_x + lx, base_y + ly);
                     heights[(ly + 1) as usize][(lx + 1) as usize] = h;
-                    max_height = max_height.max(h);
+                    // Elevated lakes can sit many meters above their bed.
+                    // Mesh the actual initial water surface, not only terrain.
+                    max_height = max_height.max(h)
+                        .max(t.initial_water_surface(base_x+lx,base_y+ly));
                 }
             }
             // Keep edited underground tunnels visible without scanning the solid core.
@@ -194,6 +197,18 @@ mod water_mesh_tests {
     use super::*;
     use crate::terrain::WORLD_SIZE;
 
+    #[test]
+    fn elevated_lake_mesh_reaches_absolute_initial_water_surface() {
+        let t=Terrain::new();
+        let (x,y)=(WORLD_SIZE/2-115,WORLD_SIZE/2+125);
+        assert_eq!(t.initial_water_surface(x,y),126);
+        assert!(t.height(x,y)<125);
+        let m=build(&t,x,y,0);
+        let water_vertices=m.indices[m.water_index_start as usize..].iter()
+            .map(|&index|m.vertices[index as usize].pos);
+        assert!(water_vertices.into_iter().any(|p|(p[2]-126.0).abs()<1e-5),
+            "the elevated lake must render its free surface at Z=126");
+    }
     #[test]
     fn partial_water_neighbors_emit_only_height_difference_not_full_panels() {
         let mut t=Terrain::new();
