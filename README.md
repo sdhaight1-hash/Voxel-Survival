@@ -49,7 +49,7 @@ The first click captures the mouse; subsequent clicks edit blocks. Maximum reach
 - **Logical chunk:** 32 × 32 × 32 voxels; 32,000 × 32,000 horizontal chunk coordinates, eight vertical sections (Z=0..255). The prototype caches nearby 32×32 chunk-column meshes individually on the GPU (logical 32³ storage is a later milestone).
 - **Vertical:** Z=0..255 (256 blocks); **sea level Z=110**, with alpha-blended finite-volume surface and side tiles.
 - **Player:** collision body 1.3 meters high, 0.56 meters wide; first-person camera 1.18 meters above feet.
-- **Terrain:** seamless multi-scale periodic 4D noise; dry-land spawn search; stone, dirt, grass; finite initialized ocean water. Regional plate-boundary, wind-belt, rain-shadow and solar-energy models are available but geological and climate evolution are not yet coupled into terrain generation.
+- **Terrain:** seamless multi-scale periodic 4D noise; collision-tested dry-land spawn with neighboring camera clearance; stone, dirt, grass; finite initialized ocean water. Regional plate-boundary, wind-belt, rain-shadow and solar-energy models are available but geological and climate evolution are not yet coupled into terrain generation.
 - **Streaming:** seven-by-seven nearby chunk-column window; existing GPU meshes are retained during movement and only newly entered or locally modified columns are remeshed. Edits and water overrides remain in memory for the session.
 
 ## Simulation progress

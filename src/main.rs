@@ -143,6 +143,58 @@ fn update_player(p: &mut Player, t: &Terrain, keys: &HashSet<KeyCode>, dt: f32) 
     p.pos.z = p.pos.z.clamp(0.0, (WORLD_HEIGHT - 2) as f64);
 }
 
+// Spawn on a *tested* surface, never at the edge of a cliff or inside a
+// higher neighboring column. The player's feet are at the exact block top.
+fn spawn_is_safe(t: &Terrain, position: DVec3) -> bool {
+    if collides(t, position)
+        || !collides(t, position - DVec3::Z * GROUND_PROBE)
+        || t.block(position.x.floor() as i32, position.y.floor() as i32,
+                   (position.z + EYE_HEIGHT).floor() as i32).solid() {
+        return false;
+    }
+    // Give the camera a clear 2m radius. The old algorithm only measured
+    // the center column; nearby higher terrain caused spawn clipping and
+    // exposed invisible terrain interiors when looking around.
+    let x=position.x.floor() as i32;
+    let y=position.y.floor() as i32;
+    for dy in -2..=2 {
+        for dx in -2..=2 {
+            // Query actual blocks, not just procedural elevation. This also
+            // catches a later block edit beside the intended spawning area.
+            for z in position.z.floor() as i32..=(position.z + PLAYER_HEIGHT + 0.5).floor() as i32 {
+                if t.block(x+dx,y+dy,z).solid() {return false;}
+            }
+        }
+    }
+    true
+}
+
+fn find_safe_spawn(t: &Terrain) -> Player {
+    let center = WORLD_SIZE / 2;
+    // Search by expanding rings to avoid bias toward one direction.
+    // 4m spacing covers a 512m square while retaining local flat clearings.
+    for radius in 0i32..=64 {
+        for dy in -radius..=radius {
+            for dx in -radius..=radius {
+                if dx.abs()!=radius && dy.abs()!=radius {continue;}
+                let x=center+dx*4;
+                let y=center+dy*4;
+                let h=t.height(x,y);
+                if h < terrain::SEA_LEVEL+3 || h+PLAYER_HEIGHT.ceil() as i32 >= WORLD_HEIGHT {
+                    continue;
+                }
+                let pos=DVec3::new(x as f64+0.5,y as f64+0.5,h as f64+1.0);
+                if spawn_is_safe(t,pos) {
+                    return Player {
+                        pos,velocity_z:0.0,yaw:0.3,pitch:-0.2,grounded:true,
+                    };
+                }
+            }
+        }
+    }
+    panic!("No collision-free dry spawn found within 256m of map center");
+}
+
 // Return targeted solid block and the preceding empty cell.
 fn target_block(t: &Terrain, p: &Player) -> Option<((i32,i32,i32), (i32,i32,i32))> {
     let start = p.eye();
@@ -472,32 +524,7 @@ impl Game {
             multisample:Default::default(),multiview:None,
         });
         let terrain = Terrain::new();
-        let spawn_x = WORLD_SIZE as f64 / 2.0;
-        let spawn_y = WORLD_SIZE as f64 / 2.0;
-        // Pick the closest dry ground within a 256 m square; no submerged start.
-        let mut spawn = (spawn_x as i32, spawn_y as i32);
-        let mut found = false;
-        for radius in 0i32..=8 {
-            for dy in -radius..=radius {
-                for dx in -radius..=radius {
-                    if dx.abs() != radius && dy.abs() != radius { continue; }
-                    let x = spawn_x as i32 + dx * 16;
-                    let y = spawn_y as i32 + dy * 16;
-                    if terrain.height(x, y) >= terrain::SEA_LEVEL + 3 {
-                        spawn = (x, y);
-                        found = true;
-                        break;
-                    }
-                }
-                if found { break; }
-            }
-            if found { break; }
-        }
-        let spawn_z = terrain.height(spawn.0, spawn.1).max(terrain::SEA_LEVEL) as f64 + 2.0;
-        let player = Player {
-            pos:DVec3::new(spawn.0 as f64,spawn.1 as f64,spawn_z),
-            velocity_z:0.0, yaw:0.3,pitch:-0.2,grounded:false,
-        };
+        let player = find_safe_spawn(&terrain);
         let depth = depth_view(&device,size);
         let chunk_offsets = device.create_buffer(&wgpu::BufferDescriptor {
             label:Some("chunk offset placeholder"),size:8,
@@ -894,6 +921,30 @@ mod movement_tests {
         }
         assert!(peak > 202.15, "jump must exceed one-meter obstacle with clearance");
         assert!(p.pos.x > x as f64 + 3.3, "player should traverse the block");
+    }
+
+    #[test]
+    fn spawn_has_clear_body_camera_and_support() {
+        let t=Terrain::new();
+        let p=find_safe_spawn(&t);
+        assert!(!collides(&t,p.pos),"player intersects terrain at spawn");
+        assert!(spawn_is_safe(&t,p.pos),"spawn lacks safe surrounding clearance");
+        assert!(support_below(&t,&p),"spawn has no ground below feet");
+        assert!(p.pos.z>terrain::SEA_LEVEL as f64+2.0);
+    }
+
+    #[test]
+    fn reject_spawn_with_higher_neighbor() {
+        let mut t=Terrain::new();
+        let x=WORLD_SIZE/2;
+        let y=WORLD_SIZE/2;
+        for dx in -3..=3 {
+            for dy in -3..=3 {t.set(x+dx,y+dy,200,Block::Stone);}
+        }
+        let pos=DVec3::new(x as f64+0.5,y as f64+0.5,201.0);
+        assert!(spawn_is_safe(&t,pos));
+        t.set(x+2,y,201,Block::Stone);
+        assert!(!spawn_is_safe(&t,pos));
     }
 
     #[test]
