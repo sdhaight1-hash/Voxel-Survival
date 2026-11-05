@@ -1,6 +1,7 @@
 mod mesh;
 mod terrain;
 mod hydrology;
+mod soil;
 mod geoscience;
 mod hud;
 
@@ -321,6 +322,8 @@ struct Game {
     hud_frame_ms: f32,
     physics_accumulator: f32,
     water_accumulator: f32,
+    soil_accumulator: f32,
+    soil_climate_seconds: f64,
     world_time_seconds: f64,
     time_scale: u32,
     surface_temperature: geoscience::ThermalCell,
@@ -582,6 +585,7 @@ impl Game {
             keys:HashSet::new(),mouse_captured:false,last_frame:Instant::now(),
             hud_frame_seconds:0.0,hud_elapsed:0.0,hud_frames:0,hud_fps:0.0,hud_frame_ms:0.0,
             physics_accumulator:0.0,water_accumulator:0.0,
+            soil_accumulator:0.0,soil_climate_seconds:0.0,
             world_time_seconds:0.0,time_scale:1,
             surface_temperature:geoscience::ThermalCell {temperature_c:15.0},
             sunlight:1.0,
@@ -709,6 +713,8 @@ impl Game {
         let prior_time=self.world_time_seconds;
         let advanced=frame_dt as f64*self.time_scale as f64;
         self.world_time_seconds+=advanced;
+        self.soil_accumulator+=frame_dt;
+        self.soil_climate_seconds+=advanced*72.0;
         // One 20-minute calendar day corresponds to 86,400 climatic seconds.
         // Substep heat integration so 1000x never applies an enormous dt.
         let thermal_seconds=advanced*72.0;
@@ -748,9 +754,15 @@ impl Game {
         if self.water_accumulator >= 0.2 {
             self.water_accumulator = 0.0;
             self.terrain.step_water(4096);
-            let dirty=self.terrain.take_water_dirty();
-            if !dirty.is_empty() {self.refresh_edited_chunks(&dirty);}
         }
+        if self.soil_accumulator >= 0.2 {
+            let elapsed=self.soil_climate_seconds;
+            self.soil_accumulator=0.0;
+            self.soil_climate_seconds=0.0;
+            self.terrain.step_soil(elapsed,4096);
+        }
+        let dirty=self.terrain.take_water_dirty();
+        if !dirty.is_empty() {self.refresh_edited_chunks(&dirty);}
         let cx = (self.player.pos.x as i32).div_euclid(32) * 32;
         let cy = (self.player.pos.y as i32).div_euclid(32) * 32;
         if (cx,cy) != self.mesh_origin { self.rebuild(); }
