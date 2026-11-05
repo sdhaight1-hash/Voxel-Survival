@@ -6,7 +6,7 @@ mod hud;
 
 use std::{collections::{HashMap,HashSet}, sync::Arc, time::Instant};
 use bytemuck::{Pod, Zeroable};
-use glam::{Mat4, Vec3};
+use glam::{DVec3, Mat4, Vec3};
 use terrain::{Block, Terrain, WORLD_SIZE, WORLD_HEIGHT};
 use wgpu::util::DeviceExt;
 use winit::{
@@ -18,11 +18,11 @@ use winit::{
 };
 
 const VIEW_RADIUS: i32 = 3;
-const PLAYER_HEIGHT: f32 = 1.3;
-const PLAYER_RADIUS: f32 = 0.28;
-const EYE_HEIGHT: f32 = 1.18;
-const JUMP_SPEED: f32 = 7.5;
-const GRAVITY: f32 = 20.0;
+const PLAYER_HEIGHT: f64 = 1.3;
+const PLAYER_RADIUS: f64 = 0.28;
+const EYE_HEIGHT: f64 = 1.18;
+const JUMP_SPEED: f64 = 7.5;
+const GRAVITY: f64 = 20.0;
 const MOUSE_SENSITIVITY: f32 = 0.002;
 
 #[repr(C)]
@@ -34,8 +34,8 @@ struct CameraUniform {
 }
 
 struct Player {
-    pos: Vec3, // feet; Z up; X/Y wrap
-    velocity_z: f32,
+    pos: DVec3, // precise world meters, feet; Z up; X/Y wrap
+    velocity_z: f64,
     yaw: f32,
     pitch: f32,
     grounded: bool,
@@ -44,16 +44,16 @@ impl Player {
     fn forward(&self) -> Vec3 {
         Vec3::new(self.yaw.cos() * self.pitch.cos(), self.yaw.sin() * self.pitch.cos(), self.pitch.sin())
     }
-    fn eye(&self) -> Vec3 { self.pos + Vec3::Z * EYE_HEIGHT }
+    fn eye(&self) -> DVec3 { self.pos + DVec3::Z * EYE_HEIGHT }
 }
 
 // Player is a continuous AABB; voxel coordinates are integer unit cubes.
 // The epsilon avoids treating a mere face-to-face touch as penetration.
-const COLLISION_EPS: f32 = 0.0001;
-const GROUND_PROBE: f32 = 0.025;
+const COLLISION_EPS: f64 = 0.0001;
+const GROUND_PROBE: f64 = 0.025;
 const PHYSICS_DT: f32 = 1.0 / 120.0;
 
-fn collides(t: &Terrain, pos: Vec3) -> bool {
+fn collides(t: &Terrain, pos: DVec3) -> bool {
     let min_x = (pos.x - PLAYER_RADIUS + COLLISION_EPS).floor() as i32;
     let max_x = (pos.x + PLAYER_RADIUS - COLLISION_EPS).floor() as i32;
     let min_y = (pos.y - PLAYER_RADIUS + COLLISION_EPS).floor() as i32;
@@ -69,15 +69,16 @@ fn collides(t: &Terrain, pos: Vec3) -> bool {
     }
     false
 }
-fn wrap_pos(v: f32) -> f32 { v.rem_euclid(WORLD_SIZE as f32) }
+fn wrap_pos(v: f64) -> f64 { v.rem_euclid(WORLD_SIZE as f64) }
 
 fn support_below(t: &Terrain, p: &Player) -> bool {
-    collides(t, p.pos - Vec3::Z * GROUND_PROBE)
+    collides(t, p.pos - DVec3::Z * GROUND_PROBE)
 }
-fn horizontal_direction(p: &Player, keys: &HashSet<KeyCode>) -> Vec3 {
-    let forward = Vec3::new(p.yaw.cos(), p.yaw.sin(), 0.0);
-    let right = Vec3::new(p.yaw.sin(), -p.yaw.cos(), 0.0);
-    let mut v = Vec3::ZERO;
+fn horizontal_direction(p: &Player, keys: &HashSet<KeyCode>) -> DVec3 {
+    let yaw = p.yaw as f64;
+    let forward = DVec3::new(yaw.cos(), yaw.sin(), 0.0);
+    let right = DVec3::new(yaw.sin(), -yaw.cos(), 0.0);
+    let mut v = DVec3::ZERO;
     if keys.contains(&KeyCode::KeyW) { v += forward; }
     if keys.contains(&KeyCode::KeyS) { v -= forward; }
     if keys.contains(&KeyCode::KeyD) { v += right; }
@@ -87,6 +88,7 @@ fn horizontal_direction(p: &Player, keys: &HashSet<KeyCode>) -> Vec3 {
 
 // Called at a fixed 120 Hz, never with the display frame duration.
 fn update_player(p: &mut Player, t: &Terrain, keys: &HashSet<KeyCode>, dt: f32) {
+    let dt = dt as f64;
     let supported = support_below(t, p);
     if p.velocity_z <= 0.0 && supported {
         p.grounded = true;
@@ -105,7 +107,7 @@ fn update_player(p: &mut Player, t: &Terrain, keys: &HashSet<KeyCode>, dt: f32) 
         let travel = (old_velocity + p.velocity_z) * 0.5 * dt;
         let steps = (travel.abs() / 0.06).ceil().max(1.0) as usize;
         for _ in 0..steps {
-            let candidate = p.pos + Vec3::Z * (travel / steps as f32);
+            let candidate = p.pos + DVec3::Z * (travel / steps as f64);
             if collides(t, candidate) {
                 // Small substeps keep the player at their last nonpenetrating
                 // position; no floor(z)+1 teleport / forced camera movement.
@@ -128,26 +130,26 @@ fn update_player(p: &mut Player, t: &Terrain, keys: &HashSet<KeyCode>, dt: f32) 
     let travel = horizontal_direction(p, keys) * 5.0 * dt;
     let steps = (travel.length() / 0.08).ceil().max(1.0) as usize;
     for _ in 0..steps {
-        let step = travel / steps as f32;
+        let step = travel / steps as f64;
         // Independent axes permit sliding along walls.
-        let x = Vec3::new(wrap_pos(p.pos.x + step.x), p.pos.y, p.pos.z);
+        let x = DVec3::new(wrap_pos(p.pos.x + step.x), p.pos.y, p.pos.z);
         if !collides(t, x) { p.pos = x; }
-        let y = Vec3::new(p.pos.x, wrap_pos(p.pos.y + step.y), p.pos.z);
+        let y = DVec3::new(p.pos.x, wrap_pos(p.pos.y + step.y), p.pos.z);
         if !collides(t, y) { p.pos = y; }
     }
     // A ledge can be crossed during horizontal movement; it is no longer
     // supported, but gravity starts on the next fixed simulation step.
     if p.grounded && !support_below(t, p) { p.grounded = false; }
-    p.pos.z = p.pos.z.clamp(0.0, (WORLD_HEIGHT - 2) as f32);
+    p.pos.z = p.pos.z.clamp(0.0, (WORLD_HEIGHT - 2) as f64);
 }
 
 // Return targeted solid block and the preceding empty cell.
 fn target_block(t: &Terrain, p: &Player) -> Option<((i32,i32,i32), (i32,i32,i32))> {
     let start = p.eye();
-    let direction = p.forward();
+    let direction = p.forward().as_dvec3();
     let mut previous = None;
     for i in 1..=120 {
-        let q = start + direction * (i as f32 * 0.05);
+        let q = start + direction * (i as f64 * 0.05);
         let cell = (q.x.floor() as i32, q.y.floor() as i32, q.z.floor() as i32);
         if previous == Some(cell) { continue; }
         if t.block(cell.0, cell.1, cell.2).solid() {
@@ -470,8 +472,8 @@ impl Game {
             multisample:Default::default(),multiview:None,
         });
         let terrain = Terrain::new();
-        let spawn_x = WORLD_SIZE as f32 / 2.0;
-        let spawn_y = WORLD_SIZE as f32 / 2.0;
+        let spawn_x = WORLD_SIZE as f64 / 2.0;
+        let spawn_y = WORLD_SIZE as f64 / 2.0;
         // Pick the closest dry ground within a 256 m square; no submerged start.
         let mut spawn = (spawn_x as i32, spawn_y as i32);
         let mut found = false;
@@ -491,9 +493,9 @@ impl Game {
             }
             if found { break; }
         }
-        let spawn_z = terrain.height(spawn.0, spawn.1).max(terrain::SEA_LEVEL) as f32 + 2.0;
+        let spawn_z = terrain.height(spawn.0, spawn.1).max(terrain::SEA_LEVEL) as f64 + 2.0;
         let player = Player {
-            pos:Vec3::new(spawn.0 as f32,spawn.1 as f32,spawn_z),
+            pos:DVec3::new(spawn.0 as f64,spawn.1 as f64,spawn_z),
             velocity_z:0.0, yaw:0.3,pitch:-0.2,grounded:false,
         };
         let depth = depth_view(&device,size);
@@ -661,9 +663,9 @@ impl Game {
         let cy = (self.player.pos.y as i32).div_euclid(32) * 32;
         if (cx,cy) != self.mesh_origin { self.rebuild(); }
         let eye = self.player.eye();
-        let x = terrain::delta(eye.x.floor() as i32,self.mesh_origin.0) as f32 + eye.x.fract();
-        let y = terrain::delta(eye.y.floor() as i32,self.mesh_origin.1) as f32 + eye.y.fract();
-        let local_eye = Vec3::new(x,y,eye.z);
+        let x = (terrain::delta(eye.x.floor() as i32,self.mesh_origin.0) as f64 + eye.x.fract()) as f32;
+        let y = (terrain::delta(eye.y.floor() as i32,self.mesh_origin.1) as f64 + eye.y.fract()) as f32;
+        let local_eye = Vec3::new(x,y,eye.z as f32);
         let view = Mat4::look_to_rh(local_eye,self.player.forward(),Vec3::Z);
         let aspect = self.config.width as f32 / self.config.height as f32;
         let proj = Mat4::perspective_rh(75.0_f32.to_radians(),aspect,0.05,400.0);
@@ -853,7 +855,7 @@ mod movement_tests {
     use super::*;
 
     fn player(x: f32, y: f32, z: f32) -> Player {
-        Player { pos: Vec3::new(x,y,z), velocity_z:0.0, yaw:0.0,
+        Player { pos: DVec3::new(x as f64,y as f64,z as f64), velocity_z:0.0, yaw:0.0,
                  pitch:0.0, grounded:true }
     }
 
@@ -865,10 +867,10 @@ mod movement_tests {
         let z = 230.0; // Air above terrain, so direction is isolated.
         let mut p = player(x,y,z);
         update_player(&mut p,&t,&HashSet::from([KeyCode::KeyD]),1.0/60.0);
-        assert!(p.pos.y < y, "D should move right, toward negative Y at yaw 0");
+        assert!(p.pos.y < y as f64, "D should move right, toward negative Y at yaw 0");
         let mut p = player(x,y,z);
         update_player(&mut p,&t,&HashSet::from([KeyCode::KeyA]),1.0/60.0);
-        assert!(p.pos.y > y, "A should move left, toward positive Y at yaw 0");
+        assert!(p.pos.y > y as f64, "A should move left, toward positive Y at yaw 0");
     }
 
     #[test]
@@ -891,7 +893,7 @@ mod movement_tests {
             peak = peak.max(p.pos.z);
         }
         assert!(peak > 202.15, "jump must exceed one-meter obstacle with clearance");
-        assert!(p.pos.x > x as f32 + 3.3, "player should traverse the block");
+        assert!(p.pos.x > x as f64 + 3.3, "player should traverse the block");
     }
 
     #[test]
