@@ -206,8 +206,8 @@ fn player_overlaps_cell(p:&Player, cell:(i32,i32,i32)) -> bool {
         && dx+1.0 > fx-PLAYER_RADIUS+COLLISION_EPS
         && dy < fy+PLAYER_RADIUS-COLLISION_EPS
         && dy+1.0 > fy-PLAYER_RADIUS+COLLISION_EPS
-        && cell.2 as f64 < p.pos.z+PLAYER_HEIGHT-COLLISION_EPS
-        && (cell.2+1) as f64 > p.pos.z+COLLISION_EPS
+        && (cell.2 as f64) < p.pos.z+PLAYER_HEIGHT-COLLISION_EPS
+        && ((cell.2+1) as f64) > p.pos.z+COLLISION_EPS
 }
 
 // Return targeted solid block and the preceding empty cell.
