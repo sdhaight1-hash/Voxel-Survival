@@ -18,6 +18,9 @@ const VIEW_RADIUS: i32 = 3;
 const PLAYER_HEIGHT: f32 = 1.3;
 const PLAYER_RADIUS: f32 = 0.28;
 const EYE_HEIGHT: f32 = 1.18;
+const JUMP_SPEED: f32 = 7.5;
+const GRAVITY: f32 = 20.0;
+const MOUSE_SENSITIVITY: f32 = 0.002;
 
 #[repr(C)]
 #[derive(Copy, Clone, Pod, Zeroable)]
@@ -57,7 +60,9 @@ fn wrap_pos(v: f32) -> f32 { v.rem_euclid(WORLD_SIZE as f32) }
 
 fn update_player(p: &mut Player, t: &Terrain, keys: &HashSet<KeyCode>, dt: f32) {
     let forward = Vec3::new(p.yaw.cos(), p.yaw.sin(), 0.0);
-    let right = Vec3::new(-p.yaw.sin(), p.yaw.cos(), 0.0);
+    // In our Z-up coordinates, positive yaw turns the camera counterclockwise.
+    // Screen-right is the clockwise perpendicular to horizontal forward.
+    let right = Vec3::new(p.yaw.sin(), -p.yaw.cos(), 0.0);
     let mut movement = Vec3::ZERO;
     if keys.contains(&KeyCode::KeyW) { movement += forward; }
     if keys.contains(&KeyCode::KeyS) { movement -= forward; }
@@ -65,35 +70,42 @@ fn update_player(p: &mut Player, t: &Terrain, keys: &HashSet<KeyCode>, dt: f32) 
     if keys.contains(&KeyCode::KeyA) { movement -= right; }
     if movement.length_squared() > 0.0 { movement = movement.normalize() * 5.0 * dt; }
 
-    for axis in 0..2 {
-        let mut candidate = p.pos;
-        if axis == 0 { candidate.x = wrap_pos(candidate.x + movement.x); }
-        else { candidate.y = wrap_pos(candidate.y + movement.y); }
-        if !collides(t, candidate) {
-            p.pos = candidate;
-        } else if p.grounded {
-            // One-meter stair step over ordinary block-height terrain.
-            let raised = candidate + Vec3::Z;
-            if !collides(t, raised) && !collides(t, p.pos + Vec3::Z) {
-                p.pos = raised;
-            }
-        }
-    }
+    // Resolve jumping before horizontal motion, so a rising player can climb
+    // the face of a one-meter block instead of being blocked for that frame.
     if p.grounded && keys.contains(&KeyCode::Space) {
-        p.velocity_z = 6.0;
+        p.velocity_z = JUMP_SPEED;
         p.grounded = false;
     }
-    p.velocity_z = (p.velocity_z - 20.0 * dt).max(-35.0);
-    let candidate = p.pos + Vec3::Z * p.velocity_z * dt;
-    if collides(t, candidate) {
-        if p.velocity_z < 0.0 {
-            p.pos.z = candidate.z.floor() + 1.0;
-            p.grounded = true;
+
+    // Substep vertical movement to avoid skipping thin obstacles at high fall speed.
+    let previous_velocity = p.velocity_z;
+    p.velocity_z = (p.velocity_z - GRAVITY * dt).max(-35.0);
+    let displacement = (previous_velocity + p.velocity_z) * 0.5 * dt;
+    let steps = (displacement.abs() / 0.10).ceil().max(1.0) as usize;
+    for _ in 0..steps {
+        let candidate = p.pos + Vec3::Z * (displacement / steps as f32);
+        if collides(t, candidate) {
+            if displacement < 0.0 {
+                // The collision occurred while crossing the top of a block.
+                p.pos.z = candidate.z.floor() + 1.0;
+                p.grounded = true;
+            }
+            p.velocity_z = 0.0;
+            break;
         }
-        p.velocity_z = 0.0;
-    } else {
         p.pos = candidate;
         p.grounded = false;
+    }
+
+    // Only collide horizontally. The previous full-meter auto-step made
+    // characters teleport up cliffs instead of having to jump them.
+    let steps = (movement.length() / 0.10).ceil().max(1.0) as usize;
+    for _ in 0..steps {
+        let step = movement / steps as f32;
+        let x = Vec3::new(wrap_pos(p.pos.x + step.x), p.pos.y, p.pos.z);
+        if !collides(t, x) { p.pos = x; }
+        let y = Vec3::new(p.pos.x, wrap_pos(p.pos.y + step.y), p.pos.z);
+        if !collides(t, y) { p.pos = y; }
     }
     // Prevent leaving the vertical world bounds.
     p.pos.z = p.pos.z.clamp(0.0, (WORLD_HEIGHT - 2) as f32);
@@ -509,8 +521,8 @@ fn main() {
     event_loop.run(move |event, target| {
         match event {
             Event::DeviceEvent {event:DeviceEvent::MouseMotion {delta},..} if game.mouse_captured => {
-                game.player.yaw += delta.0 as f32 * 0.002;
-                game.player.pitch = (game.player.pitch - delta.1 as f32 * 0.002).clamp(-1.54,1.54);
+                game.player.yaw -= delta.0 as f32 * MOUSE_SENSITIVITY;
+                game.player.pitch = (game.player.pitch - delta.1 as f32 * MOUSE_SENSITIVITY).clamp(-1.54,1.54);
             }
             Event::WindowEvent {event,window_id} if window_id == window.id() => match event {
                 WindowEvent::CloseRequested => target.exit(),
