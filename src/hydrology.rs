@@ -80,7 +80,11 @@ impl Terrain {
 
     /// Remove a scheduled flux from the top of an open water column.
     fn remove_surface_liters(&mut self,(x,y):(i32,i32),mut amount:u32,bed:i32) {
-        for z in (bed..WORLD_HEIGHT).rev() {
+        let volume=self.surface_column(x,y).liters;
+        assert!(volume>=amount && amount>0,"surface donor overdraw");
+        let top=bed+((volume-1)/CAPACITY_L as u32) as i32;
+        // Never scan 100+ meters of empty air above a shallow water film.
+        for z in (bed..=top.min(WORLD_HEIGHT-1)).rev() {
             if amount==0 {break;}
             let current=self.water_liters(x,y,z);
             let moved=amount.min(current as u32) as u16;
@@ -93,7 +97,10 @@ impl Terrain {
     }
     /// Store a scheduled flux in the lowest available cells above the bed.
     fn add_surface_liters(&mut self,(x,y):(i32,i32),mut amount:u32,bed:i32) {
-        for z in bed..WORLD_HEIGHT {
+        let volume=self.surface_column(x,y).liters;
+        let start=bed+(volume/CAPACITY_L as u32) as i32;
+        // Start at the current free surface, not the basin floor.
+        for z in start..WORLD_HEIGHT {
             if amount==0 {break;}
             if self.block(x,y,z).solid() {continue;}
             let current=self.water_liters(x,y,z);
