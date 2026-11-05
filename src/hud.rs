@@ -20,15 +20,9 @@ pub fn heading_degrees(yaw: f32) -> f64 {
 }
 
 /// Centered map-space positions in meters, independent of spawn location.
-pub fn centered_meters(world: f32) -> f64 {
-    (world as f64 - WORLD_SIZE as f64 / 2.0)
-        .rem_euclid(WORLD_SIZE as f64 / 2.0 + WORLD_SIZE as f64 / 2.0)
-        // Choose the symmetric [-512km, 512km) display interval.
-        .min(WORLD_SIZE as f64 / 2.0)
-}
 pub fn centered_coordinate(world:f32) -> f64 {
-    (world as f64 + WORLD_SIZE as f64 / 2.0)
-        .rem_euclid(WORLD_SIZE as f64) - WORLD_SIZE as f64 / 2.0
+    (world as f64).rem_euclid(WORLD_SIZE as f64)
+        - WORLD_SIZE as f64 / 2.0
 }
 pub fn longitude_degrees(x:f32) -> f64 {
     centered_coordinate(x) * 360.0 / WORLD_SIZE as f64
@@ -53,7 +47,7 @@ fn text(out:&mut [u8],x:i32,y:i32,message:&str,color:[u8;4],scale:i32) {
         if let Some(glyph)=BASIC_FONTS.get(ch) {
             for (row,bits) in glyph.iter().enumerate() {
                 for col in 0..8 {
-                    if bits & (1<<col)!=0 {
+                    if *bits & (1<<col)!=0 {
                         fill(out,cursor+col*scale,y+row as i32*scale,
                             scale,scale,color);
                     }
