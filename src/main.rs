@@ -875,9 +875,9 @@ impl Game {
             self.terrain.step_water(4096);
             let ms=water_clock.elapsed().as_secs_f64()*1000.0;
             if ms>25.0 {
-                eprintln!("hydrology slow water tick: {:.0}ms cave_active={} surface_columns={}",
+                eprintln!("hydrology slow water tick: {:.0}ms cave_active={} surface_tiles={}",
                     ms,self.terrain.water.active.len(),
-                    self.terrain.water.surface_active.len());
+                    self.terrain.water.surface_tiles.len());
             }
         }
         if self.soil_accumulator >= 0.2 {
