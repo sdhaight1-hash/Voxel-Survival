@@ -1,6 +1,7 @@
 mod mesh;
 mod terrain;
 mod hydrology;
+mod surface_solver;
 mod soil;
 mod atmosphere;
 mod geoscience;
