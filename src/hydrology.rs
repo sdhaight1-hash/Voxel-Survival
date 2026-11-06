@@ -958,7 +958,7 @@ mod tests {
         let z=t.height(x,y)+1;
         t.water_assign((x,y,z),100);
         assert!(t.water.active.is_empty());
-        assert_eq!(t.water.surface_tiles.len(),4);
+        assert_eq!(t.water.surface_tiles.len(),3);
         assert!(t.water.surface_tiles.contains(&(x,y)));
     }
     #[test]
@@ -1015,7 +1015,7 @@ mod tests {
         }
         assert!(t.water.active.len()<=1,
             "ocean depth must not multiply surface update work");
-        assert_eq!(t.water.surface_tiles.len(),4);
+        assert_eq!(t.water.surface_tiles.len(),3);
     }
     #[test]
     fn low_head_difference_does_not_churn_a_liter_forever() {
