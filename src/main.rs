@@ -756,10 +756,10 @@ impl Game {
             let (x,y)=self.chunks[i].origin;
             if !self.pending_mesh_chunks.remove(&(x,y)) {continue;}
             let water=mesh::build_water(&self.terrain,x,y,0);
-            let (vertices,indices,count)=self.water_buffers(&water);
+            let (vertices,indices,water_count)=self.water_buffers(&water);
             self.chunks[i].water_vertices=vertices;
             self.chunks[i].water_indices=indices;
-            self.chunks[i].water_count=count;
+            self.chunks[i].water_count=water_count;
             rebuilt+=1;
             next=(i+1)%count;
         }
