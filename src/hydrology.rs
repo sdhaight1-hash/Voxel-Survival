@@ -519,15 +519,16 @@ mod tests {
         let mut t=Terrain::new();
         let x=WORLD_SIZE/2;
         let y=WORLD_SIZE/2;
-        let center=(x,y,240);
+        let bed=t.height(x,y)+1;
+        let center=(x,y,bed);
         t.water_assign(center,750);
-        t.water_assign((x,y,241),0);
-        let before:u32=t.water.amounts.values().map(|&v|v as u32).sum();
+        let before=t.water.surface_delta_liters;
         assert!(t.try_place_solid(center,Block::Stone));
-        assert_eq!(t.block(x,y,240),Block::Stone);
-        assert_eq!(t.water_liters(x,y,240),0);
-        assert_eq!(t.water_liters(x,y,241),750);
-        assert_eq!(before,t.water.amounts.values().map(|&v|v as u32).sum());
+        assert_eq!(t.block(x,y,bed),Block::Stone);
+        assert_eq!(t.water_liters(x,y,bed),0);
+        assert_eq!(t.water_liters(x,y,bed+1),750,
+            "solid displacement must lift the water above the block");
+        assert_eq!(before,t.water.surface_delta_liters);
     }
 
     #[test]
@@ -535,11 +536,13 @@ mod tests {
         let mut t=Terrain::new();
         let x=WORLD_SIZE/2;
         let y=WORLD_SIZE/2;
-        for z in 232..=235 {t.water_assign((x,y,z),CAPACITY_L);}
-        let before:u32=t.water.amounts.values().map(|&v|v as u32).sum();
-        assert!(t.try_place_solid((x,y,232),Block::Dirt));
-        assert_eq!(t.block(x,y,232),Block::Dirt);
-        assert_eq!(before,t.water.amounts.values().map(|&v|v as u32).sum());
+        let bed=t.height(x,y)+1;
+        for z in bed..bed+4 {t.water_assign((x,y,z),CAPACITY_L);}
+        let before=t.water.surface_delta_liters;
+        assert!(t.try_place_solid((x,y,bed),Block::Dirt));
+        assert_eq!(t.block(x,y,bed),Block::Dirt);
+        assert_eq!(t.water_liters(x,y,bed+4),CAPACITY_L);
+        assert_eq!(before,t.water.surface_delta_liters);
     }
 
     #[test]
@@ -547,14 +550,14 @@ mod tests {
         let mut t=Terrain::new();
         let x=WORLD_SIZE/2;
         let y=WORLD_SIZE/2;
-        t.set(x,y,239,Block::Stone);
-        t.water_assign((x,y,240),550);
-        t.set(x,y,239,Block::Air);
-        assert_eq!(t.water_liters(x,y,239),0);
-        assert_eq!(t.water_liters(x,y,240),550);
+        let bed=t.height(x,y)+1;
+        t.water_assign((x,y,bed),550);
+        t.set(x,y,bed-1,Block::Air);
+        assert_eq!(t.water_liters(x,y,bed-1),0);
+        assert_eq!(t.water_liters(x,y,bed),550);
         t.step_water(64);
-        let total:u32=t.water.amounts.values().map(|&v|v as u32).sum();
-        assert_eq!(total,550);
+        assert!(t.water_liters(x,y,bed-1)>0);
+        assert_eq!(t.water.surface_delta_liters,550);
     }
 
     #[test]
@@ -618,7 +621,8 @@ mod tests {
     #[test]
     fn rain_is_limited_by_atmospheric_storage() {
         let mut t=Terrain::new();
-        let at=(WORLD_SIZE/2,WORLD_SIZE/2,240);
+        let x=WORLD_SIZE/2;let y=WORLD_SIZE/2;
+        let at=(x,y,t.height(x,y)+1);
         t.water.atmosphere_liters=300;
         assert_eq!(t.precipitate(at,700),300);
         assert_eq!(t.water.atmosphere_liters,0);
@@ -688,12 +692,12 @@ mod tests {
         for _ in 0..150 {
             t.step_water(4096);
         }
-        let lake_return:u32=t.water.amounts.iter()
-            .filter(|(&(x,yy,z),&liters)| {
+        let lake_return:i64=t.water.surface_column_delta.iter()
+            .filter(|&(&(x,yy),&liters)| {
                 let dx=x-lake_x;let dy=yy-y;
-                dx*dx+dy*dy<=76*76 && z>=126 && liters>0
+                dx*dx+dy*dy<=76*76 && liters>0
             })
-            .map(|(_, &liters)|liters as u32).sum();
+            .map(|(_, &liters)|liters).sum();
         assert!(lake_return>0,
             "water must return across a valid downhill bank into the lake");
         assert_eq!(t.water.surface_delta_liters,initial_delta,
@@ -787,31 +791,32 @@ mod tests {
         }
     }
     #[test]
-    fn gapped_column_donor_moves_real_water_not_derived_waterline() {
+    fn free_surface_cannot_leave_a_floating_layer_after_depletion() {
         let mut t=Terrain::new();
         let (x,y)=(WORLD_SIZE/2-115,WORLD_SIZE/2+125);
         let bed=t.height(x,y)+1;
-        assert!(t.initial_water_surface(x,y)>bed+1);
-        // A mined drainage path can empty a lower layer while upper
-        // implicit lake water is still present. Aggregate volume alone
-        // does not tell us where those real liters reside.
-        t.water_assign((x,y,bed),0);
         let upper=t.initial_water_surface(x,y)-1;
-        assert_eq!(t.water_liters(x,y,upper),CAPACITY_L);
+        assert!(upper>bed);
+        t.water_assign((x,y,bed),0);
+        assert_eq!(t.water_liters(x,y,bed),CAPACITY_L);
+        assert_eq!(t.water_liters(x,y,upper),0,
+            "water leaving a column lowers its surface, never empties its floor");
         let before=t.water.surface_delta_liters;
         t.remove_surface_liters((x,y),45,bed);
-        assert_eq!(t.water_liters(x,y,upper),CAPACITY_L-45);
+        assert_eq!(t.water_liters(x,y,upper-1),CAPACITY_L-45);
         assert_eq!(t.water.surface_delta_liters,before-45);
     }
     #[test]
-    fn gapped_column_receiver_fills_lowest_real_open_cell() {
+    fn incoming_water_fills_surface_not_a_nonexistent_floor_gap() {
         let mut t=Terrain::new();
         let (x,y)=(WORLD_SIZE/2-115,WORLD_SIZE/2+125);
         let bed=t.height(x,y)+1;
+        let upper=t.initial_water_surface(x,y)-1;
         t.water_assign((x,y,bed),0);
         let before=t.water.surface_delta_liters;
         t.add_surface_liters((x,y),45,bed);
-        assert_eq!(t.water_liters(x,y,bed),45);
+        assert_eq!(t.water_liters(x,y,bed),CAPACITY_L);
+        assert_eq!(t.water_liters(x,y,upper),45);
         assert_eq!(t.water.surface_delta_liters,before+45);
     }
     #[test]
@@ -858,11 +863,14 @@ mod tests {
         t.water_assign((0,y,240),200);
         let left=(WORLD_SIZE-32,y);
         let right=(0,y);
-        assert!(t.water.changed_by_chunk[&left].contains(&(WORLD_SIZE-1,y,240)));
-        assert!(t.water.changed_by_chunk[&right].contains(&(0,y,240)));
+        let z_left=t.initial_water_surface(-1,y);
+        let z_right=t.initial_water_surface(0,y);
+        assert!(t.water.changed_by_chunk[&left].contains(&(WORLD_SIZE-1,y,z_left)));
+        assert!(t.water.changed_by_chunk[&right].contains(&(0,y,z_right)));
+        let count=t.water.changed_by_chunk[&right].len();
         t.water_assign((0,y,240),400);
-        assert_eq!(t.water.changed_by_chunk[&right].len(),1,
-            "editing the same cell must not duplicate mesh-index entries");
+        assert_eq!(t.water.changed_by_chunk[&right].len(),count,
+            "repeated column edits should not grow the mesh index unboundedly");
     }
     #[test]
     fn deep_surface_water_activation_does_not_multiply_with_depth() {
@@ -900,8 +908,9 @@ mod tests {
     #[test]
     fn water_transfers_conserve_local_mass_and_wrap() {
         let mut t=Terrain::new();
-        let from=(WORLD_SIZE-1,0,240);
-        let to=(0,0,240);
+        // Z=110 is the exposed surface of the periodic ocean.
+        let from=(WORLD_SIZE-1,0,110);
+        let to=(0,0,110);
         t.water_assign(from,1000);
         t.water_assign(to,0);
         let before=t.water_liters(from.0,from.1,from.2) as u32
@@ -915,14 +924,13 @@ mod tests {
         let mut t=Terrain::new();
         let x=WORLD_SIZE/2;
         let y=WORLD_SIZE/2;
-        t.water_assign((x,y,240),1000);
-        t.water_assign((x,y,239),0);
-        let before=t.water_liters(x,y,239)+t.water_liters(x,y,240);
+        let bed=t.height(x,y)+1;
+        t.water_assign((x,y,bed),1000);
+        t.set(x,y,bed-1,Block::Air);
+        let before=t.water.surface_delta_liters;
         t.step_water(128);
-        assert!(t.water_liters(x,y,239)>0);
-        // Water may spread laterally during the same tick. Count *every*
-        // modified cell, not only the original source/destination pair.
-        let total: u32=t.water.amounts.values().map(|&v| v as u32).sum();
-        assert_eq!(before as u32,total);
+        assert!(t.water_liters(x,y,bed-1)>0);
+        assert_eq!(t.water.surface_delta_liters,before,
+            "gravity transfers from column into cave with exact accounting");
     }
 }
