@@ -1046,6 +1046,24 @@ mod tests {
         assert!(t.water.amounts.is_empty());
     }
     #[test]
+    fn live_surface_momentum_crosses_periodic_ocean_seam_without_mass_loss() {
+        let mut t=Terrain::new();
+        // The ocean is already filled through Z109; place one extra cubic
+        // meter at Z110 along the east-west seam.
+        t.water_assign((WORLD_SIZE-1,0,110),1000);
+        let delta=t.water.surface_delta_liters;
+        assert_eq!(t.water_liters(0,0,110),0);
+        let mut crossed=false;
+        for _ in 0..16 {
+            t.step_water(4096);
+            if t.water_liters(0,0,110)>0 {crossed=true;break;}
+        }
+        assert!(crossed,"momentum must cross the periodic seam");
+        assert_eq!(t.water.surface_delta_liters,delta);
+        assert_eq!(t.water_mass_error_liters(),delta,
+            "a closed surface-only test contains no atmospheric offset");
+    }
+    #[test]
     fn water_transfers_conserve_local_mass_and_wrap() {
         let mut t=Terrain::new();
         // Z=110 is the exposed surface of the periodic ocean.
