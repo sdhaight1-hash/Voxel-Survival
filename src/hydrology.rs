@@ -199,7 +199,15 @@ impl Terrain {
         let bed=self.height(cell.0,cell.1)+1;
         if z>=bed {
             let col=self.surface_column(cell.0,cell.1);
-            let below=(z-bed) as i64*CAPACITY_L as i64;
+            // Rare player-placed solid blocks occupy storage in a column.
+            // Water fills the remaining free cells in order, rising around
+            // displaced rock without inventing or deleting any liters.
+            // The ordinary unedited ocean takes the constant-time path.
+            let below=if self.water.blocked_surface_columns
+                .contains(&(cell.0,cell.1)) {
+                (bed..z).filter(|&zz|!self.edits.get(&(cell.0,cell.1,zz))
+                    .is_some_and(|b|b.solid())).count() as i64*CAPACITY_L as i64
+            } else {(z-bed) as i64*CAPACITY_L as i64};
             return (col.liters as i64-below).clamp(0,CAPACITY_L as i64) as u16;
         }
         self.water.amounts.get(&cell).copied().unwrap_or(0)
