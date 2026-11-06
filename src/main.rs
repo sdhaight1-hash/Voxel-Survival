@@ -776,7 +776,7 @@ impl Game {
             self.player.pos.y,self.player.pos.z,
             self.hud_fps,self.hud_frame_ms,self.time_scale,self.world_time_seconds,
             water_liters,
-            self.terrain.water.active.len()+self.terrain.water.surface_active.len(),
+            self.terrain.water.surface_tiles.len(),
             self.terrain.water.surface_delta_liters,self.terrain.water.atmosphere_liters,
             self.terrain.water_mass_error_liters()
                 +self.atmosphere.water_delta_kg().round() as i64,
