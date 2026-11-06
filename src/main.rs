@@ -345,6 +345,7 @@ fn depth_view(device: &wgpu::Device, size: PhysicalSize<u32>) -> wgpu::TextureVi
 
 impl Game {
     async fn new(window: Arc<winit::window::Window>) -> Self {
+        let startup_clock=Instant::now();
         // Explicit Vulkan backend as requested; no OpenGL/DX12 fallback.
         let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
             backends: wgpu::Backends::VULKAN, ..Default::default()
@@ -359,6 +360,8 @@ impl Game {
             label: Some("voxel GPU"), required_features: wgpu::Features::empty(),
             required_limits: wgpu::Limits::default(),
         }, None).await.expect("Create GPU device");
+        eprintln!("hydrology startup: Vulkan device ready in {:.1}s",
+            startup_clock.elapsed().as_secs_f64());
         let size = window.inner_size();
         let mut config = surface.get_default_config(&adapter,size.width.max(1),size.height.max(1))
             .expect("Surface configuration");
@@ -594,7 +597,11 @@ impl Game {
             surface_temperature:geoscience::ThermalCell {temperature_c:15.0},
             sunlight:1.0,
         };
+        let mesh_clock=Instant::now();
         game.rebuild();
+        eprintln!("hydrology startup: initial chunk meshes {:.0}ms; total {:.1}s",
+            mesh_clock.elapsed().as_secs_f64()*1000.0,
+            startup_clock.elapsed().as_secs_f64());
         game.upload_hud();
         game
     }
@@ -767,7 +774,13 @@ impl Game {
         self.water_accumulator += frame_dt;
         if self.water_accumulator >= 0.2 {
             self.water_accumulator = 0.0;
+            let water_clock=Instant::now();
             self.terrain.step_water(4096);
+            let ms=water_clock.elapsed().as_secs_f64()*1000.0;
+            if ms>100.0 {
+                eprintln!("hydrology slow water tick: {:.0}ms active={}",
+                    ms,self.terrain.water.active.len());
+            }
         }
         if self.soil_accumulator >= 0.2 {
             let elapsed=self.soil_climate_seconds;
@@ -790,7 +803,15 @@ impl Game {
             );
         }
         let dirty=self.terrain.take_water_dirty();
-        if !dirty.is_empty() {self.refresh_edited_chunks(&dirty);}
+        if !dirty.is_empty() {
+            let mesh_clock=Instant::now();
+            self.refresh_edited_chunks(&dirty);
+            let ms=mesh_clock.elapsed().as_secs_f64()*1000.0;
+            if ms>100.0 {
+                eprintln!("hydrology slow water remesh: {:.0}ms dirty={}",
+                    ms,dirty.len());
+            }
+        }
         let cx = (self.player.pos.x as i32).div_euclid(32) * 32;
         let cy = (self.player.pos.y as i32).div_euclid(32) * 32;
         if (cx,cy) != self.mesh_origin { self.rebuild(); }
