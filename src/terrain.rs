@@ -188,7 +188,7 @@ mod tests {
                 let world=(m+x,m+y);
                 let water=t.initial_water_surface(world.0,world.1);
                 if water<=SEA_LEVEL+1 {continue;}
-                if Self::lake_distance(x as f64,y as f64)<78.0 {continue;}
+                if Terrain::lake_distance(x as f64,y as f64)<78.0 {continue;}
                 if t.height(world.0,world.1)+1>=water {continue;}
                 for (dx,dy) in [(-1,0),(1,0),(0,-1),(0,1)] {
                     let nx=world.0+dx;let ny=world.1+dy;
