@@ -745,6 +745,30 @@ mod tests {
             calm_ms,active_ms,transfers,dirty);
     }
     #[test]
+    fn rain_and_draining_lake_survive_repeated_solver_ticks_with_zero_mass_error() {
+        let mut t=Terrain::new();
+        let mut atmosphere=crate::atmosphere::Atmosphere::new_af();
+        let x=WORLD_SIZE/2-115;let y=WORLD_SIZE/2+125;
+        let bed=t.height(x,y)+1;
+        assert!(t.water_liters(x,y,bed)>0);
+        // A drainage cavity below multiple layers of implicit lake water
+        // creates an unsettled column while the upper lake stays flooded.
+        t.set(x,y,bed-1,Block::Air);
+        for tick in 0..80 {
+            if tick%8==0 {
+                atmosphere.advance_af(3_600.0);
+                atmosphere.rain_near(&mut t,x+72,y,3_600.0);
+                atmosphere.evaporate_near(&mut t,x+72,y,3_600.0);
+                t.step_soil(3_600.0,4096);
+                t.step_groundwater(3_600.0,4096);
+            }
+            t.step_water(4096);
+            let error=t.water_mass_error_liters() as f64
+                +atmosphere.water_delta_kg();
+            assert!(error.abs()<0.01,"closed water budget drift at tick {tick}: {error}");
+        }
+    }
+    #[test]
     fn gapped_column_donor_moves_real_water_not_derived_waterline() {
         let mut t=Terrain::new();
         let (x,y)=(WORLD_SIZE/2-115,WORLD_SIZE/2+125);
