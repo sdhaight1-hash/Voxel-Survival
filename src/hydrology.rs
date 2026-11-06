@@ -89,6 +89,15 @@ impl Terrain {
         SurfaceColumn {bed,liters,head_m,blocked}
     }
 
+    /// Absolute free-surface elevation for surface meshing. A packed open
+    /// column has only one top face, regardless of ocean depth. Roofed and
+    /// disjoint local 3D cells are rendered by the cave-water mesh path.
+    pub(crate) fn open_water_elevation(&self,x:i32,y:i32)->Option<f32> {
+        let col=self.surface_column(x,y);
+        if col.liters==0 || col.blocked{return None;}
+        Some((col.bed as f64+col.liters as f64/CAPACITY_L as f64) as f32)
+    }
+
     /// A free-surface column is the sole owner of its open-water volume.
     /// Submerged voxel fill is a derived projection. Store sparse changes
     /// against the finite implicit lake/ocean, not one override per meter.
