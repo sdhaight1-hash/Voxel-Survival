@@ -121,7 +121,12 @@ impl Terrain {
             self.water.changed_by_chunk.entry(chunk).or_default().insert(at);
         }
         self.water.activate_surface((x,y));
-        self.soil.activate((x,y));
+        // Soil infiltration sees only the water immediately at its bed.
+        // Movement of an ocean's *top* must not reactivate thousands of
+        // already-submerged soil columns each climate tick.
+        let old_bed=col.liters.min(CAPACITY_L as u32);
+        let new_bed=(after as u32).min(CAPACITY_L as u32);
+        if old_bed!=new_bed {self.soil.activate((x,y));}
     }
 
     fn remove_surface_liters(&mut self,(x,y):(i32,i32),amount:u32,_bed:i32) {
