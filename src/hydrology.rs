@@ -161,12 +161,17 @@ impl Terrain {
         }
         let mut coords:Vec<_>=touched.into_iter().collect();
         coords.sort_unstable();
+        // Read each terrain/column ONCE per water tick. All eight
+        // substeps mutate a scratch inventory; only the final net liter
+        // delta is written back, coalescing GPU/soil/activation updates.
+        let mut columns=HashMap::with_capacity(coords.len());
+        for &(x,y) in &coords {
+            columns.insert((x,y),self.surface_column(x,y));
+        }
+        let initial:Vec<_>=coords.iter()
+            .map(|&key|(key,columns[&key].liters)).collect();
         let mut movements=0;
         for _ in 0..SUBSTEPS {
-            let mut columns=HashMap::with_capacity(coords.len());
-            for &(x,y) in &coords {
-                columns.insert((x,y),self.surface_column(x,y));
-            }
             let mut taken:HashMap<(i32,i32),u32>=HashMap::new();
             let mut received:HashMap<(i32,i32),u32>=HashMap::new();
             for &here in &coords {
@@ -198,8 +203,9 @@ impl Terrain {
                     } else {(there,here,b,a)};
                     let crest=a.bed.max(b.bed) as f64;
                     // Don't empty a basin through a higher solid bank.
-                    let spill=((source.head_m-crest).max(0.0)
-                        *CAPACITY_L as f64).floor() as u32;
+                    let spill=((source.bed as f64
+                        +source.liters as f64/CAPACITY_L as f64
+                        -crest).max(0.0)*CAPACITY_L as f64).floor() as u32;
                     let available=spill.min(source.liters)
                         .saturating_sub(*taken.get(&from).unwrap_or(&0));
                     let capacity=(WORLD_HEIGHT-dest.bed).max(0) as u32
@@ -233,11 +239,15 @@ impl Terrain {
                 }
             }
             for (cell,amount) in taken {
-                self.adjust_surface_liters(cell.0,cell.1,-(amount as i64));
+                columns.get_mut(&cell).expect("scheduled source").liters-=amount;
             }
             for (cell,amount) in received {
-                self.adjust_surface_liters(cell.0,cell.1,amount as i64);
+                columns.get_mut(&cell).expect("scheduled receiver").liters+=amount;
             }
+        }
+        for (cell,original) in initial {
+            let changed=columns[&cell].liters as i64-original as i64;
+            if changed!=0 {self.adjust_surface_liters(cell.0,cell.1,changed);}
         }
         movements
     }
