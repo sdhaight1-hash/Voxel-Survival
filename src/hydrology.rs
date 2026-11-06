@@ -197,6 +197,7 @@ impl Terrain {
         let initial:Vec<_>=coords.iter()
             .map(|&key|(key,columns[&key].liters)).collect();
         let mut movements=0;
+        let mut momentum_tiles=HashSet::new();
         for _ in 0..SUBSTEPS {
             let mut taken:HashMap<(i32,i32),u32>=HashMap::new();
             let mut received:HashMap<(i32,i32),u32>=HashMap::new();
@@ -229,7 +230,8 @@ impl Terrain {
                     let (from,to,source,dest)=if flow.rate_m3_s>0.0 {
                         (here,there,a,b)
                     } else {(there,here,b,a)};
-                    let crest=a.bed.max(b.bed) as f64;
+                    let crest=(a.head_m-a.liters as f64/CAPACITY_L as f64)
+                        .max(b.head_m-b.liters as f64/CAPACITY_L as f64);
                     // Don't empty a basin through a higher solid bank.
                     let spill=((source.bed as f64
                         +source.liters as f64/CAPACITY_L as f64
@@ -263,6 +265,11 @@ impl Terrain {
                         self.water.surface_edges.remove(&key);
                     } else {
                         self.water.surface_edges.insert(key,flow);
+                        // A sub-liter flow carries momentum even when its
+                        // *net integer liters* remain zero this tick.
+                        // Keep both tiles awake to integrate its remainder.
+                        momentum_tiles.insert(here);
+                        momentum_tiles.insert(there);
                     }
                 }
             }
@@ -277,6 +284,7 @@ impl Terrain {
             let changed=columns[&cell].liters as i64-original as i64;
             if changed!=0 {self.adjust_surface_liters(cell.0,cell.1,changed);}
         }
+        for cell in momentum_tiles {self.water.activate_surface(cell);}
         movements
     }
 
