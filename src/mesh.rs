@@ -402,6 +402,7 @@ mod water_mesh_tests {
         let x=WORLD_SIZE/2;let y=WORLD_SIZE/2;
         let z=t.height(x,y)-2;
         t.set(x,y,z,Block::Air);
+        t.set(x+1,y,z,Block::Air); // Expose an actual cave wall to air.
         t.water_assign((x,y,z),650);
         let m=build_water(&t,x,y,0);
         assert!(!m.indices.is_empty(),"excavated water must remain visible");
