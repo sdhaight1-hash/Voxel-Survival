@@ -76,6 +76,27 @@ struct SurfaceColumn {
 }
 
 impl Terrain {
+    /// Project packed water volume around rare player-placed solid voxels.
+    /// Regular ocean columns take the O(1) path. An immediate solid roof
+    /// over the top wet cell marks a locally capped/3D water component.
+    fn packed_surface_stage(&self,x:i32,y:i32,bed:i32,liters:u32)->(f64,bool) {
+        if liters==0{return (bed as f64,false);}
+        if !self.water.blocked_surface_columns.contains(&(x,y)) {
+            return (bed as f64+liters as f64/CAPACITY_L as f64,false);
+        }
+        let mut remaining=liters;
+        for z in bed..WORLD_HEIGHT {
+            if self.edits.get(&(x,y,z)).is_some_and(|b|b.solid()) {continue;}
+            if remaining<=CAPACITY_L as u32 {
+                let roof=self.edits.get(&(x,y,z+1))
+                    .is_some_and(|b|b.solid());
+                return (z as f64+remaining as f64/CAPACITY_L as f64,roof);
+            }
+            remaining-=CAPACITY_L as u32;
+        }
+        (WORLD_HEIGHT as f64,true)
+    }
+
     /// Water surface above a voxel terrain column. Ignore enclosed columns
     /// or disjoint floating liquid; those need a local 3D/conduit solver.
     fn surface_column(&self,x:i32,y:i32)->SurfaceColumn {
@@ -86,7 +107,7 @@ impl Terrain {
         let delta=self.water.surface_column_delta.get(&(x,y)).copied().unwrap_or(0);
         let liters=(baseline+delta).max(0) as u32;
         let depth=liters as f64/CAPACITY_L as f64;
-        let blocked=self.water.blocked_surface_columns.contains(&(x,y));
+        let (stage,blocked)=self.packed_surface_stage(x,y,bed,liters);
         // A consistent invisible micro-relief field; its influence is
         // limited to thin runoff. Deep lake surfaces remain well-balanced.
         let mx=crate::terrain::delta(x,crate::terrain::WORLD_SIZE/2) as f64;
@@ -95,7 +116,7 @@ impl Terrain {
         let lake_grade=0.08*((r-78.0)/25.0).clamp(0.0,1.0);
         let small_roughness=0.01*(mx/23.0).sin()*(my/19.0).cos();
         let micro=lake_grade+small_roughness;
-        let head_m=bed as f64+depth+micro*(1.0-depth/0.25).clamp(0.0,1.0);
+        let head_m=stage+micro*(1.0-depth/0.25).clamp(0.0,1.0);
         SurfaceColumn {bed,liters,head_m,blocked}
     }
 
@@ -105,7 +126,7 @@ impl Terrain {
     pub(crate) fn open_water_elevation(&self,x:i32,y:i32)->Option<f32> {
         let col=self.surface_column(x,y);
         if col.liters==0 || col.blocked{return None;}
-        Some((col.bed as f64+col.liters as f64/CAPACITY_L as f64) as f32)
+        Some(self.packed_surface_stage(wrap(x),wrap(y),col.bed,col.liters).0 as f32)
     }
 
     /// A free-surface column is the sole owner of its open-water volume.
@@ -191,11 +212,13 @@ impl Terrain {
                         .copied().unwrap_or_default();
                     advance_edge(&mut flow,
                         SurfaceCell {
-                            bed_m:a.bed as f64,liters:a.liters as u64,
+                            bed_m:a.head_m-a.liters as f64/CAPACITY_L as f64,
+                            liters:a.liters as u64,
                             blocked:a.blocked,
                         },
                         SurfaceCell {
-                            bed_m:b.bed as f64,liters:b.liters as u64,
+                            bed_m:b.head_m-b.liters as f64/CAPACITY_L as f64,
+                            liters:b.liters as u64,
                             blocked:b.blocked,
                         },DT);
                     if flow.rate_m3_s.abs()<0.000_000_001
@@ -438,7 +461,7 @@ impl Terrain {
         let (x,y)=(wrap(x),wrap(y));
         let col=self.surface_column(x,y);
         if col.blocked || col.liters==0 {return None;}
-        let z=col.bed+((col.liters-1)/CAPACITY_L as u32) as i32;
+        let z=self.packed_surface_stage(x,y,col.bed,col.liters).0.ceil() as i32-1;
         if z>=WORLD_HEIGHT || self.water_liters(x,y,z)==0
             || self.block(x,y,z+1)!=Block::Air {return None;}
         Some((x,y,z))
@@ -703,6 +726,29 @@ mod tests {
         let z=50;
         t.set(x,y,z,Block::Air);
         assert_eq!(t.water_liters(x,y,z),0);
+    }
+    #[test]
+    fn surface_displacement_rises_around_rock_and_open_top_can_flow() {
+        let mut t=Terrain::new();
+        let x=WORLD_SIZE/2;let y=WORLD_SIZE/2;
+        let bed=t.height(x,y)+1;
+        t.water_assign((x,y,bed),800);
+        let total=t.water.surface_delta_liters;
+        assert!(t.try_place_solid((x,y,bed),Block::Stone));
+        assert_eq!(t.water_liters(x,y,bed),0);
+        assert_eq!(t.water_liters(x,y,bed+1),800);
+        assert_eq!(t.open_water_elevation(x,y),Some(bed as f32+1.8));
+        assert_eq!(t.water.surface_delta_liters,total);
+    }
+    #[test]
+    fn a_solid_roof_makes_an_enclosed_column_not_a_free_surface() {
+        let mut t=Terrain::new();
+        let x=WORLD_SIZE/2;let y=WORLD_SIZE/2;
+        let bed=t.height(x,y)+1;
+        t.water_assign((x,y,bed),800);
+        t.set(x,y,bed+1,Block::Stone);
+        assert!(t.open_water_elevation(x,y).is_none());
+        assert_eq!(t.water_liters(x,y,bed),800);
     }
     #[test]
     fn rain_is_limited_by_atmospheric_storage() {
