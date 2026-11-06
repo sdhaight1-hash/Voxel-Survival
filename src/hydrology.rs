@@ -27,8 +27,10 @@ pub struct WaterState {
     // excavation/cave gravity and pressure only.
     pub(crate) active: BTreeSet<Cell>,
     active_cursor:Option<Cell>,
-    pub(crate) surface_active:BTreeSet<(i32,i32)>,
-    surface_cursor:Option<(i32,i32)>,
+    // Surface scheduling is per 32x32 tile, not a BTreeSet entry for
+    // every wet square meter of ocean. A tile is awakened on local flow.
+    pub(crate) surface_tiles:BTreeSet<(i32,i32)>,
+    surface_tile_cursor:Option<(i32,i32)>,
     // Edge momentum persists between 0.2-second gameplay ticks; a
     // head-only transfer that resets velocity every tick cannot form a
     // natural stream or reservoir surge.
@@ -46,8 +48,11 @@ pub struct WaterState {
 }
 impl WaterState {
     pub fn activate_surface(&mut self,(x,y):(i32,i32)) {
+        let n=crate::terrain::CHUNK_SIZE;
         for (dx,dy) in [(0,0),(-1,0),(1,0),(0,-1),(0,1)] {
-            self.surface_active.insert((wrap(x+dx),wrap(y+dy)));
+            let x=wrap(x+dx);
+            let y=wrap(y+dy);
+            self.surface_tiles.insert((x.div_euclid(n)*n,y.div_euclid(n)*n));
         }
     }
     pub fn activate(&mut self, at:Cell) {
@@ -529,18 +534,38 @@ impl Terrain {
         // Work on distinct horizontal wet columns, not every voxel in
         // their depth. The column scheduler uses the same round-robin
         // fairness as the sparse underground voxel queue.
-        let column_budget=self.water.surface_active.len().min(max_cells);
-        let mut columns=Vec::with_capacity(column_budget);
-        if let Some(last)=self.water.surface_cursor {
-            columns.extend(self.water.surface_active
-                .range((Excluded(last),Unbounded)).take(column_budget).copied());
+        // Four wet 32x32 tiles fit the 4096-column surface budget.
+        // Soil/weather and cave scheduling are independent. Skip dry cells
+        // in a tile, but neighbors of wet cells can still receive flux.
+        const TILE_CELLS:usize=(crate::terrain::CHUNK_SIZE
+            *crate::terrain::CHUNK_SIZE) as usize;
+        let tile_budget=if max_cells==0 {0} else {
+            max_cells.div_ceil(TILE_CELLS).min(self.water.surface_tiles.len())
+        };
+        let mut selected=Vec::with_capacity(tile_budget);
+        if let Some(last)=self.water.surface_tile_cursor {
+            selected.extend(self.water.surface_tiles
+                .range((Excluded(last),Unbounded)).take(tile_budget).copied());
         }
-        if columns.len()<column_budget {
-            columns.extend(self.water.surface_active.iter()
-                .take(column_budget-columns.len()).copied());
+        if selected.len()<tile_budget {
+            selected.extend(self.water.surface_tiles.iter()
+                .take(tile_budget-selected.len()).copied());
         }
-        if let Some(&last)=columns.last() {self.water.surface_cursor=Some(last);}
-        for &cell in &columns {self.water.surface_active.remove(&cell);}
+        if let Some(&last)=selected.last() {
+            self.water.surface_tile_cursor=Some(last);
+        }
+        for &tile in &selected {self.water.surface_tiles.remove(&tile);}
+        let mut columns=Vec::with_capacity(tile_budget*TILE_CELLS);
+        for (tile_x,tile_y) in selected {
+            for dy in 0..crate::terrain::CHUNK_SIZE {
+                for dx in 0..crate::terrain::CHUNK_SIZE {
+                    let (x,y)=(tile_x+dx,tile_y+dy);
+                    if self.surface_column(x,y).liters>0 {
+                        columns.push((x,y));
+                    }
+                }
+            }
+        }
         transfers+=self.step_surface_flow(&columns);
         transfers+self.step_conduit_pressure(&processed)
     }
@@ -730,7 +755,7 @@ mod tests {
         let mut has_flow=false;
         for _ in 0..100 {
             if t.step_water(4096)>0 {has_flow=true;}
-            if t.water.active.is_empty() && t.water.surface_active.is_empty(){break;}
+            if t.water.active.is_empty() && t.water.surface_tiles.is_empty(){break;}
         }
         assert!(has_flow,"spill should move according to head");
         assert_eq!(t.water.surface_delta_liters,initial_delta,
@@ -887,8 +912,8 @@ mod tests {
         let z=t.height(x,y)+1;
         t.water_assign((x,y,z),100);
         assert!(t.water.active.is_empty());
-        assert_eq!(t.water.surface_active.len(),5);
-        assert!(t.water.surface_active.contains(&(x,y)));
+        assert_eq!(t.water.surface_tiles.len(),4);
+        assert!(t.water.surface_tiles.contains(&(x,y)));
     }
     #[test]
     fn hydrology_tick_obeys_active_budget_without_draining_backlog() {
@@ -944,7 +969,7 @@ mod tests {
         }
         assert!(t.water.active.len()<=1,
             "ocean depth must not multiply surface update work");
-        assert_eq!(t.water.surface_active.len(),5);
+        assert_eq!(t.water.surface_tiles.len(),4);
     }
     #[test]
     fn low_head_difference_does_not_churn_a_liter_forever() {
@@ -955,7 +980,7 @@ mod tests {
         let prior=t.water.surface_delta_liters;
         for _ in 0..20 {t.step_water(4096);}
         assert_eq!(t.water.surface_delta_liters,prior);
-        assert!(t.water.surface_active.len()<20);
+        assert!(t.water.surface_tiles.len()<20);
     }
     #[test]
     fn dry_active_neighbors_are_not_hydraulic_sources() {
