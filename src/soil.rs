@@ -2,7 +2,8 @@
 //! Surface/soil/groundwater movement uses real stored liters.  Dry baseline
 //! soil is implicit; only disturbed/wet columns are allocated.
 use crate::terrain::{wrap, Block, Terrain, WORLD_SIZE};
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeSet, HashMap, HashSet};
+use std::ops::Bound::{Excluded, Unbounded};
 
 type Column=(i32,i32);
 
@@ -18,7 +19,9 @@ pub struct SoilColumn {
 #[derive(Default)]
 pub struct SoilState {
     columns:HashMap<Column,SoilColumn>,
-    active:HashSet<Column>,
+    active:BTreeSet<Column>,
+    active_cursor:Option<Column>,
+    groundwater_cursor:Option<Column>,
     // Signed changes from the implicit baseline in finite topsoil storage.
     pub delta_soil_liters:i64,
     pub groundwater_liters:u64,
@@ -121,11 +124,23 @@ impl Terrain {
     /// The 1m deep topsoil has a finite pore volume, and finite groundwater
     /// storage below it. No off-world sink, infinite refill, or free water.
     pub fn step_soil(&mut self,dt_climate_seconds:f64,max_columns:usize)->usize {
-        let mut pending:Vec<Column>=self.soil.active.drain().collect();
-        pending.sort_unstable();
+        // Cap soil work without draining/sorting every pending column.
+        // Round-robin traversal prevents self-reactivating wet soil from
+        // starving distant groundwater columns indefinitely.
+        let budget=max_columns.min(self.soil.active.len());
+        let mut pending=Vec::with_capacity(budget);
+        if let Some(last)=self.soil.active_cursor {
+            pending.extend(self.soil.active.range((Excluded(last),Unbounded))
+                .take(budget).copied());
+        }
+        if pending.len()<budget {
+            pending.extend(self.soil.active.iter()
+                .take(budget-pending.len()).copied());
+        }
+        if let Some(&last)=pending.last() {self.soil.active_cursor=Some(last);}
+        for &key in &pending {self.soil.active.remove(&key);}
         let mut changed=0;
-        for (i,key) in pending.into_iter().enumerate() {
-            if i>=max_columns {self.soil.active.insert(key);continue;}
+        for key in pending {
             let mat=SoilMaterial::from_terrain(self,key.0,key.1);
             if mat.capacity_l==0 {continue;}
             let mut column=self.soil.columns.get(&key).copied().unwrap_or(SoilColumn {
@@ -188,9 +203,19 @@ impl Terrain {
     /// time and F1 time-lapse do not suppress slow subsurface movement.
     pub fn step_groundwater(&mut self,dt_climate_seconds:f64,max_columns:usize)->usize {
         if dt_climate_seconds<=0.0 {return 0;}
-        let mut active:Vec<Column>=self.soil.active.iter().copied().collect();
-        active.sort_unstable();
-        active.truncate(max_columns);
+        let budget=max_columns.min(self.soil.active.len());
+        let mut active=Vec::with_capacity(budget);
+        if let Some(last)=self.soil.groundwater_cursor {
+            active.extend(self.soil.active.range((Excluded(last),Unbounded))
+                .take(budget).copied());
+        }
+        if active.len()<budget {
+            active.extend(self.soil.active.iter()
+                .take(budget-active.len()).copied());
+        }
+        if let Some(&last)=active.last() {
+            self.soil.groundwater_cursor=Some(last);
+        }
         let mut edges=HashSet::new();
         for (x,y) in active {
             edges.insert(((x,y),0u8)); // east
