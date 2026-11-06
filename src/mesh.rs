@@ -86,6 +86,15 @@ fn tile(b: Block, face: usize) -> u32 {
 }
 
 pub fn build(t: &Terrain, center_x: i32, center_y: i32, radius: i32) -> Mesh {
+    build_internal(t,center_x,center_y,radius,false)
+}
+
+/// Fast path for dynamic water refreshes: don't rebuild opaque faces.
+pub fn build_water(t:&Terrain, center_x:i32, center_y:i32, radius:i32)->Mesh {
+    build_internal(t,center_x,center_y,radius,true)
+}
+
+fn build_internal(t:&Terrain,center_x:i32,center_y:i32,radius:i32,water_only:bool)->Mesh {
     let origin_x = center_x.div_euclid(CHUNK_SIZE) * CHUNK_SIZE;
     let origin_y = center_y.div_euclid(CHUNK_SIZE) * CHUNK_SIZE;
     let mut result = Mesh { vertices: Vec::new(), indices: Vec::new(), water_index_start: 0, origin_x, origin_y };
@@ -141,7 +150,9 @@ pub fn build(t: &Terrain, center_x: i32, center_y: i32, radius: i32) -> Mesh {
                     let start_z = (lowest_neighbor - 5).min(minimum_edit_z - 1).max(0);
                     for z in start_z..=(max_height + 1).min(WORLD_HEIGHT - 1) {
                         let b = block(t, x, y, z, h);
-                        if b == Block::Air { continue; }
+                        if b == Block::Air || (water_only && b!=Block::Water) {
+                            continue;
+                        }
                         for (face, &(dx,dy,dz)) in DIRECTIONS.iter().enumerate() {
                             let nh = heights[(ly + dy + 1) as usize][(lx + dx + 1) as usize];
                             let neighbor = block(t, x + dx, y + dy, z + dz, nh);
@@ -198,6 +209,23 @@ mod water_mesh_tests {
     use super::*;
     use crate::terrain::WORLD_SIZE;
 
+    #[test]
+    fn dynamic_water_only_mesh_matches_full_chunk_water_faces() {
+        let mut t=Terrain::new();
+        let (x,y)=(WORLD_SIZE/2-115,WORLD_SIZE/2+125);
+        let bed=t.height(x,y)+1;
+        t.water_assign((x,y,bed),750);
+        let whole=build(&t,x,y,0);
+        let liquid=build_water(&t,x,y,0);
+        assert_eq!(liquid.water_index_start,0);
+        assert_eq!(whole.indices.len()-whole.water_index_start as usize,
+            liquid.indices.len());
+        let full_faces:Vec<_>=whole.indices[whole.water_index_start as usize..]
+            .iter().map(|&i|whole.vertices[i as usize].pos).collect();
+        let liquid_faces:Vec<_>=liquid.indices.iter()
+            .map(|&i|liquid.vertices[i as usize].pos).collect();
+        assert_eq!(full_faces,liquid_faces);
+    }
     #[test]
     fn water_mesh_uses_authoritative_liquid_inventory_after_depletion() {
         let mut t=Terrain::new();
