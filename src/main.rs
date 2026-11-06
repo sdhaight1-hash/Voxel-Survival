@@ -308,6 +308,10 @@ struct Game {
     camera_bind: wgpu::BindGroup,
     texture_bind: wgpu::BindGroup,
     chunks: Vec<ChunkGpu>,
+    // Changed water faces can touch many chunks in one simulation tick.
+    // Coalesce those changes and remesh a fixed number per render frame.
+    pending_mesh_chunks: HashSet<(i32,i32)>,
+    mesh_refresh_cursor: usize,
     chunk_offsets: wgpu::Buffer,
     mesh_origin: (i32, i32),
     terrain: Terrain,
@@ -586,6 +590,7 @@ impl Game {
             depth,
             camera_buffer,camera_bind,texture_bind,
             chunks:Vec::new(),chunk_offsets,
+            pending_mesh_chunks:HashSet::new(),mesh_refresh_cursor:0,
             mesh_origin:(0,0),terrain,
             atmosphere:atmosphere::Atmosphere::new_af(),
             player,selected:Block::Dirt,
@@ -657,19 +662,55 @@ impl Game {
         });
     }
 
-    // A changed voxel also affects visible faces across the adjacent border.
-    fn refresh_edited_chunks(&mut self, changed:&HashSet<(i32,i32,i32)>) {
-        let affected:Vec<(usize,i32,i32)>=self.chunks.iter().enumerate()
-            .filter(|(_,chunk)| changed.iter().any(|&(x,y,_)| {
-                let dx=terrain::delta(x,chunk.origin.0);
-                let dy=terrain::delta(y,chunk.origin.1);
-                (-1..=32).contains(&dx) && (-1..=32).contains(&dy)
-            }))
-            .map(|(index,chunk)|(index,chunk.origin.0,chunk.origin.1))
-            .collect();
-        for (index,x,y) in affected {
-            self.chunks[index]=self.gpu_chunk(x,y);
+    // Water modifications can change the face of a neighboring chunk.
+    // Return at most four distinct touched chunk origins per changed cell.
+    fn changed_chunk_origins(changed:&HashSet<(i32,i32,i32)>)
+        ->HashSet<(i32,i32)> {
+        fn origin(n:i32)->i32 {
+            terrain::wrap(n).div_euclid(terrain::CHUNK_SIZE)*terrain::CHUNK_SIZE
         }
+        let mut result=HashSet::new();
+        for &(x,y,_) in changed {
+            let current_x=origin(x);
+            let current_y=origin(y);
+            let nearby_x=[origin(x-1),current_x,origin(x+1)];
+            let nearby_y=[origin(y-1),current_y,origin(y+1)];
+            for xx in nearby_x {for yy in nearby_y {
+                result.insert((xx,yy));
+            }}
+        }
+        result
+    }
+
+    fn queue_edited_chunks(&mut self,changed:&HashSet<(i32,i32,i32)>) {
+        self.pending_mesh_chunks.extend(Self::changed_chunk_origins(changed));
+    }
+
+    /// Avoid blocking one frame for 49 chunk rebuilds. In the recorded
+    /// regression this took 100-243ms, even after the water solver passed.
+    /// A round-robin budget ensures distant visible chunks are eventually
+    /// refreshed instead of starving under continuous near-player motion.
+    fn flush_queued_chunks(&mut self) {
+        const MAX_CHUNKS_PER_FRAME:usize=2;
+        let count=self.chunks.len();
+        if count==0 || self.pending_mesh_chunks.is_empty() {return;}
+        // Only currently visible chunk meshes matter. Walking into a new
+        // chunk already builds unseen chunks from the current terrain state.
+        let visible:HashSet<_>=self.chunks.iter().map(|c|c.origin).collect();
+        self.pending_mesh_chunks.retain(|key|visible.contains(key));
+        let start=self.mesh_refresh_cursor%count;
+        let mut next=start;
+        let mut rebuilt=0;
+        for step in 0..count {
+            if rebuilt>=MAX_CHUNKS_PER_FRAME {break;}
+            let i=(start+step)%count;
+            let (x,y)=self.chunks[i].origin;
+            if !self.pending_mesh_chunks.remove(&(x,y)) {continue;}
+            self.chunks[i]=self.gpu_chunk(x,y);
+            rebuilt+=1;
+            next=(i+1)%count;
+        }
+        self.mesh_refresh_cursor=next;
     }
     fn upload_hud(&self) {
         let eye_cell=(self.player.eye().x.floor() as i32,
@@ -803,18 +844,17 @@ impl Game {
             );
         }
         let dirty=self.terrain.take_water_dirty();
-        if !dirty.is_empty() {
-            let mesh_clock=Instant::now();
-            self.refresh_edited_chunks(&dirty);
-            let ms=mesh_clock.elapsed().as_secs_f64()*1000.0;
-            if ms>100.0 {
-                eprintln!("hydrology slow water remesh: {:.0}ms dirty={}",
-                    ms,dirty.len());
-            }
-        }
+        if !dirty.is_empty() {self.queue_edited_chunks(&dirty);}
         let cx = (self.player.pos.x as i32).div_euclid(32) * 32;
         let cy = (self.player.pos.y as i32).div_euclid(32) * 32;
         if (cx,cy) != self.mesh_origin { self.rebuild(); }
+        let remesh_clock=Instant::now();
+        self.flush_queued_chunks();
+        let remesh_ms=remesh_clock.elapsed().as_secs_f64()*1000.0;
+        if remesh_ms>40.0 {
+            eprintln!("hydrology slow remesh batch: {:.0}ms queued={}",
+                remesh_ms,self.pending_mesh_chunks.len());
+        }
         let eye = self.player.eye();
         let x = (terrain::delta(eye.x.floor() as i32,self.mesh_origin.0) as f64 + eye.x.fract()) as f32;
         let y = (terrain::delta(eye.y.floor() as i32,self.mesh_origin.1) as f64 + eye.y.fract()) as f32;
@@ -855,7 +895,7 @@ impl Game {
             _=>return,
         }
         changed.extend(self.terrain.take_water_dirty());
-        if !changed.is_empty() {self.refresh_edited_chunks(&changed);}
+        if !changed.is_empty() {self.queue_edited_chunks(&changed);}
     }
     fn render(&mut self) -> Result<(),wgpu::SurfaceError> {
         let frame = self.surface.get_current_texture()?;
@@ -1016,6 +1056,22 @@ mod shader_tests {
 
 #[cfg(test)]
 mod movement_tests {
+    #[test]
+    fn changed_water_faces_invalidate_only_neighboring_chunks() {
+        let mut changed=HashSet::new();
+        changed.insert((15,15,120));
+        let chunks=Game::changed_chunk_origins(&changed);
+        assert_eq!(chunks,HashSet::from([(0,0)]));
+        changed.insert((31,31,120));
+        let chunks=Game::changed_chunk_origins(&changed);
+        assert!(chunks.contains(&(32,32)));
+        assert_eq!(chunks.len(),4);
+        let seam=Game::changed_chunk_origins(&HashSet::from([(0,0,120)]));
+        assert_eq!(seam.len(),4);
+        assert!(seam.contains(&(terrain::WORLD_SIZE-32,terrain::WORLD_SIZE-32)));
+        assert!(seam.contains(&(0,0)));
+    }
+
     use super::*;
 
     fn player(x: f32, y: f32, z: f32) -> Player {
