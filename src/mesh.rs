@@ -90,8 +90,89 @@ pub fn build(t: &Terrain, center_x: i32, center_y: i32, radius: i32) -> Mesh {
 }
 
 /// Fast path for dynamic water refreshes: don't rebuild opaque faces.
-pub fn build_water(t:&Terrain, center_x:i32, center_y:i32, radius:i32)->Mesh {
-    build_internal(t,center_x,center_y,radius,true)
+/// Render one free-surface quad per wet horizontal column, never a stack
+/// of transparent 1m water cubes. This geometry is a read-only projection
+/// of the volume owned by the conservative column store.
+pub fn build_water(t:&Terrain,center_x:i32,center_y:i32,radius:i32)->Mesh {
+    let origin_x=center_x.div_euclid(CHUNK_SIZE)*CHUNK_SIZE;
+    let origin_y=center_y.div_euclid(CHUNK_SIZE)*CHUNK_SIZE;
+    let mut m=Mesh {
+        vertices:Vec::new(),indices:Vec::new(),water_index_start:0,
+        origin_x,origin_y,
+    };
+    fn emit(m:&mut Mesh,corners:[[f32;3];4]) {
+        let start=m.vertices.len() as u32;
+        for i in 0..4 {
+            m.vertices.push(Vertex {
+                pos:corners[i],uv:UV[i],tile:4,
+            });
+        }
+        m.indices.extend_from_slice(&[start,start+1,start+2,start,start+2,start+3]);
+    }
+    for cy in -radius..=radius {
+        for cx in -radius..=radius {
+            let base_x=origin_x+cx*CHUNK_SIZE;
+            let base_y=origin_y+cy*CHUNK_SIZE;
+            for ly in 0..CHUNK_SIZE {
+                for lx in 0..CHUNK_SIZE {
+                    let x=base_x+lx;let y=base_y+ly;
+                    let Some(top)=t.open_water_elevation(x,y) else {continue;};
+                    let px=delta(x,origin_x) as f32;
+                    let py=delta(y,origin_y) as f32;
+                    // Exactly one top surface even over 30m-deep oceans.
+                    emit(&mut m,[
+                        [px,py,top],[px+1.0,py,top],
+                        [px+1.0,py+1.0,top],[px,py+1.0,top],
+                    ]);
+                    // Water has an exposed side only above the neighboring
+                    // water surface / solid ground. Do not render internal
+                    // translucent panels between fully submerged voxels.
+                    for (face,&(dx,dy,_)) in DIRECTIONS.iter().enumerate().take(4) {
+                        let neighbor_stage=t.open_water_elevation(x+dx,y+dy)
+                            .unwrap_or((t.height(x+dx,y+dy)+1) as f32);
+                        let bottom=neighbor_stage.max((t.height(x,y)+1) as f32);
+                        if bottom+0.0001>=top {continue;}
+                        let corners=std::array::from_fn(|i| {
+                            let c=CORNERS[face][i];
+                            [px+c[0],py+c[1],if c[2]>0.5 {top}else{bottom}]
+                        });
+                        emit(&mut m,corners);
+                    }
+                }
+            }
+            // Locally excavated and pressure-connected cave water is still
+            // 3D. It has no single surface per (x,y), so mesh only its
+            // sparse affected cells rather than the deep open ocean.
+            if let Some(changed)=t.water.changed_by_chunk.get(&(wrap(base_x),wrap(base_y))) {
+                for &(x,y,z) in changed {
+                    if z>t.height(x,y) {continue;}
+                    let liters=t.water_liters(x,y,z);
+                    if liters==0 {continue;}
+                    let px=delta(x,origin_x) as f32;
+                    let py=delta(y,origin_y) as f32;
+                    for (face,&(dx,dy,dz)) in DIRECTIONS.iter().enumerate() {
+                        let other=t.block(x+dx,y+dy,z+dz);
+                        let other_liters=if other==Block::Water {
+                            t.water_liters(x+dx,y+dy,z+dz)
+                        } else {0};
+                        if other!=Block::Air && other!=Block::Water {continue;}
+                        if face==4 && other==Block::Water {continue;}
+                        let current_fill=liters as f32/1000.0;
+                        let other_fill=other_liters as f32/1000.0;
+                        if face<4 && current_fill<=other_fill {continue;}
+                        let corners=std::array::from_fn(|i| {
+                            let c=CORNERS[face][i];
+                            [px+c[0],py+c[1],z as f32+
+                                if c[2]>0.5 {current_fill}
+                                else if face<4 {other_fill} else {0.0}]
+                        });
+                        emit(&mut m,corners);
+                    }
+                }
+            }
+        }
+    }
+    m
 }
 
 fn build_internal(t:&Terrain,center_x:i32,center_y:i32,radius:i32,water_only:bool)->Mesh {
