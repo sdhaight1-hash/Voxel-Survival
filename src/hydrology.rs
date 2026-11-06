@@ -2,6 +2,7 @@
 //! The initial ocean is a finite implicit volume field, never an infinite
 //! refill rule. Each withdrawn voxel is recorded as a sparse override.
 use crate::terrain::{wrap, Block, Terrain, WORLD_HEIGHT};
+use crate::surface_solver::{advance_edge,EdgeFlow,SurfaceCell};
 use std::collections::{BTreeSet, HashMap, HashSet, VecDeque};
 use std::ops::Bound::{Excluded, Unbounded};
 
@@ -28,6 +29,10 @@ pub struct WaterState {
     active_cursor:Option<Cell>,
     pub(crate) surface_active:BTreeSet<(i32,i32)>,
     surface_cursor:Option<(i32,i32)>,
+    // Edge momentum persists between 0.2-second gameplay ticks; a
+    // head-only transfer that resets velocity every tick cannot form a
+    // natural stream or reservoir surge.
+    surface_edges:HashMap<((i32,i32),u8),EdgeFlow>,
     pub(crate) dirty: HashSet<Cell>,
     // Atmosphere is an explicitly finite reservoir, not a source of free rain.
     pub atmosphere_liters: u64,
@@ -140,72 +145,103 @@ impl Terrain {
         self.adjust_surface_liters(x,y,amount as i64);
     }
 
-    /// Schedule conservative edge transfers from the same snapshot. All
-    /// fluxes are committed after the calculations, avoiding iteration-order
-    /// dependent hydraulic head changes within one step.
-    fn step_surface_flow(&mut self,active_columns:&[(i32,i32)]) -> usize {
+    /// Persistent virtual-pipe surface flux over a shared 2D water column.
+    /// Eight bounded 25ms physical substeps advance 0.2 real seconds. All
+    /// liters are transferred as paired debits/credits from one snapshot.
+    /// Sparse momentum lives on canonical east/north edges, not voxels.
+    fn step_surface_flow(&mut self,active_columns:&[(i32,i32)])->usize {
+        if active_columns.is_empty(){return 0;}
+        const SUBSTEPS:usize=8;
+        const DT:f64=0.025;
         let mut touched=HashSet::new();
         for &(x,y) in active_columns {
             for (dx,dy) in [(0,0),(-1,0),(1,0),(0,-1),(0,1)] {
                 touched.insert((wrap(x+dx),wrap(y+dy)));
             }
         }
-        let mut columns=HashMap::with_capacity(touched.len());
-        for &(x,y) in &touched {
-            columns.insert((x,y),self.surface_column(x,y));
-        }
         let mut coords:Vec<_>=touched.into_iter().collect();
         coords.sort_unstable();
-        let mut taken:HashMap<(i32,i32),u32>=HashMap::new();
-        let mut received:HashMap<(i32,i32),u32>=HashMap::new();
-        let mut fluxes=Vec::new();
-        for &(x,y) in &coords {
-            let here=(x,y);
-            for there in [(wrap(x+1),y),(x,wrap(y+1))] {
-                let Some(&a)=columns.get(&here) else {continue;};
-                let Some(&b)=columns.get(&there) else {continue;};
-                if a.blocked || b.blocked {continue;}
-                let (from,to,source,dest)=if a.head_m>b.head_m {
-                    (here,there,a,b)
-                } else {(there,here,b,a)};
-                let difference=source.head_m-dest.head_m;
-                if difference<=0.000_001 {continue;}
-                // A complete voxel step is still a real spill barrier. A
-                // microslope never allows crossing a solid one-meter wall.
-                let crest=source.bed.max(dest.bed) as f64;
-                let spillable=((source.head_m-crest).max(0.0)
-                    *CAPACITY_L as f64).floor() as u32;
-                let available=spillable.min(source.liters)
-                    .saturating_sub(*taken.get(&from).unwrap_or(&0));
-                let capacity=((WORLD_HEIGHT-dest.bed).max(0) as u32)
-                    *CAPACITY_L as u32;
-                let free=capacity.saturating_sub(dest.liters)
-                    .saturating_sub(*received.get(&to).unwrap_or(&0));
-                // Damped, bounded hydrostatic flux. Momentum will be added
-                // separately for fast rivers, waterfalls and floods.
-                // Integer liters need a real volume threshold; ceil()
-                // previously made even a microscopic gradient transfer
-                // 1L forever, reactivating calm ocean cells endlessly.
-                let requested=(difference*500.0).floor() as u32;
-                let liters=requested.min(250).min(available).min(free);
-                if liters==0 {continue;}
-                *taken.entry(from).or_default()+=liters;
-                *received.entry(to).or_default()+=liters;
-                fluxes.push((from,to,liters));
+        let mut movements=0;
+        for _ in 0..SUBSTEPS {
+            let mut columns=HashMap::with_capacity(coords.len());
+            for &(x,y) in &coords {
+                columns.insert((x,y),self.surface_column(x,y));
+            }
+            let mut taken:HashMap<(i32,i32),u32>=HashMap::new();
+            let mut received:HashMap<(i32,i32),u32>=HashMap::new();
+            for &here in &coords {
+                for (axis,there) in [
+                    (0u8,(wrap(here.0+1),here.1)),
+                    (1u8,(here.0,wrap(here.1+1))),
+                ] {
+                    let Some(&a)=columns.get(&here) else {continue;};
+                    let Some(&b)=columns.get(&there) else {continue;};
+                    let key=(here,axis);
+                    let mut flow=self.water.surface_edges.get(&key)
+                        .copied().unwrap_or_default();
+                    advance_edge(&mut flow,
+                        SurfaceCell {
+                            bed_m:a.bed as f64,liters:a.liters as u64,
+                            blocked:a.blocked,
+                        },
+                        SurfaceCell {
+                            bed_m:b.bed as f64,liters:b.liters as u64,
+                            blocked:b.blocked,
+                        },DT);
+                    if flow.rate_m3_s.abs()<0.000_000_001
+                        && flow.remainder_l<0.000_001 {
+                        self.water.surface_edges.remove(&key);
+                        continue;
+                    }
+                    let (from,to,source,dest)=if flow.rate_m3_s>0.0 {
+                        (here,there,a,b)
+                    } else {(there,here,b,a)};
+                    let crest=a.bed.max(b.bed) as f64;
+                    // Don't empty a basin through a higher solid bank.
+                    let spill=((source.head_m-crest).max(0.0)
+                        *CAPACITY_L as f64).floor() as u32;
+                    let available=spill.min(source.liters)
+                        .saturating_sub(*taken.get(&from).unwrap_or(&0));
+                    let capacity=(WORLD_HEIGHT-dest.bed).max(0) as u32
+                        *CAPACITY_L as u32;
+                    let room=capacity.saturating_sub(dest.liters)
+                        .saturating_sub(*received.get(&to).unwrap_or(&0));
+                    let fractional=flow.rate_m3_s.abs()*DT
+                        *CAPACITY_L as f64+flow.remainder_l;
+                    let wanted=fractional.floor() as u32;
+                    flow.remainder_l=fractional-wanted as f64;
+                    let moved=wanted.min(available).min(room);
+                    if moved>0 {
+                        *taken.entry(from).or_default()+=moved;
+                        *received.entry(to).or_default()+=moved;
+                        movements+=1;
+                    }
+                    // A donor which hits a solid/dry cap cannot accumulate
+                    // impossible velocity against the clipping boundary.
+                    if moved<wanted {
+                        let capped=moved as f64/(DT*CAPACITY_L as f64);
+                        flow.rate_m3_s=flow.rate_m3_s.signum()
+                            *flow.rate_m3_s.abs().min(capped);
+                        flow.remainder_l=0.0;
+                    }
+                    if flow.rate_m3_s.abs()<0.000_000_001
+                        && flow.remainder_l<0.000_001 {
+                        self.water.surface_edges.remove(&key);
+                    } else {
+                        self.water.surface_edges.insert(key,flow);
+                    }
+                }
+            }
+            for (cell,amount) in taken {
+                self.adjust_surface_liters(cell.0,cell.1,-(amount as i64));
+            }
+            for (cell,amount) in received {
+                self.adjust_surface_liters(cell.0,cell.1,amount as i64);
             }
         }
-        for (&cell,&amount) in &taken {
-            self.remove_surface_liters(cell,amount,columns[&cell].bed);
-        }
-        for (&cell,&amount) in &received {
-            self.add_surface_liters(cell,amount,columns[&cell].bed);
-        }
-        fluxes.len()
+        movements
     }
 
-    /// Compatibility view: a fluid column fills from the bottom upwards.
-    /// In open water no floating voxel can exist independently from its
-    /// column's conserved inventory. Excavated solid voxels use sparse 3D.
     pub fn water_liters(&self,x:i32,y:i32,z:i32)->u16 {
         if !(0..WORLD_HEIGHT).contains(&z) {return 0;}
         let cell=(wrap(x),wrap(y),z);
