@@ -117,9 +117,11 @@ pub fn build(t: &Terrain, center_x: i32, center_y: i32, radius: i32) -> Mesh {
                     minimum_edit_z = minimum_edit_z.min(ez);
                 }
             }
-            for (&(ex,ey,ez), _) in &t.water.amounts {
-                if (0..CHUNK_SIZE).contains(&delta(ex,base_x))
-                    && (0..CHUNK_SIZE).contains(&delta(ey,base_y)) {
+            let changed_chunk=(wrap(base_x),wrap(base_y));
+            if let Some(changed)=t.water.changed_by_chunk.get(&changed_chunk) {
+                // Water modifications are indexed spatially; don't scan
+                // every modified cell on the island for each chunk mesh.
+                for &(_,_,ez) in changed {
                     max_height=max_height.max(ez);
                     minimum_edit_z=minimum_edit_z.min(ez);
                 }
@@ -204,6 +206,19 @@ mod water_mesh_tests {
         t.water_assign((x,y,125),0);
         assert_eq!(block(&t,x,y,125,t.height(x,y)),Block::Air);
         assert_eq!(t.water_liters(x,y,125),0);
+    }
+    #[test]
+    fn sparse_water_edits_remain_in_chunk_mesh_after_indexing() {
+        let mut t=Terrain::new();
+        let x=WORLD_SIZE/2;let y=WORLD_SIZE/2;
+        t.water_assign((x,y,240),700);
+        t.water_assign((x+32,y,246),200);
+        let m=build(&t,x,y,0);
+        assert!(m.indices.len()>m.water_index_start as usize);
+        assert!(m.indices[m.water_index_start as usize..].iter()
+            .any(|&i| m.vertices[i as usize].pos[2]>=240.6));
+        assert!(m.vertices.iter().all(|v|v.pos[2]<246.0),
+            "off-chunk water edits must not bleed into local mesh");
     }
     #[test]
     fn elevated_lake_mesh_reaches_absolute_initial_water_surface() {
