@@ -550,7 +550,8 @@ mod tests {
         let before=t.water.surface_delta_liters;
         assert!(t.try_place_solid((x,y,bed),Block::Dirt));
         assert_eq!(t.block(x,y,bed),Block::Dirt);
-        assert_eq!(t.water_liters(x,y,bed+4),CAPACITY_L);
+        assert_eq!(t.water_liters(x,y,bed+1),CAPACITY_L,
+            "water must occupy the first open cell above the displaced solid");
         assert_eq!(before,t.water.surface_delta_liters);
     }
 
