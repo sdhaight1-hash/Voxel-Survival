@@ -72,7 +72,12 @@ impl Terrain {
         if let Some((distance,surface))=Self::river(x,y) {
             if distance<=9.0 {return surface.floor() as i32;}
         }
-        if Self::swamp_distance(x,y)<1.0 {return 115;}
+        // Wetland pools fill connected low ground, including their
+        // transition fringe. The previous hard 1.0-radius cutoff left
+        // physically lower *dry* neighbor cells beside water at Z=115.
+        if Self::swamp_distance(x,y)<1.5
+            && self.height(wrap(x as i32+WORLD_SIZE/2),
+                wrap(y as i32+WORLD_SIZE/2))+1<115 {return 115;}
         SEA_LEVEL
     }
 
