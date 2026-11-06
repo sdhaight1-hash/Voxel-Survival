@@ -42,6 +42,26 @@ pub struct Terrain {
 impl Terrain {
     pub fn new() -> Self { Self { noise: Perlin::new(42), height_cache:RefCell::new(HashMap::new()), edits: HashMap::new(), water: WaterState::default(), soil:SoilState::default() } }
 
+    /// The authored river has a real downhill head gradient at startup.
+    /// Prime only its narrow surface footprint; never activate every
+    /// submerged ocean voxel or a million ocean surface cells.
+    pub fn prime_initial_river_flow(&mut self) {
+        let m=WORLD_SIZE/2;
+        for dx in -125..=365 {
+            let x=dx as f64;
+            let t=((x+115.0)/475.0).clamp(0.0,1.0);
+            let center_y=125.0-190.0*t
+                +(t*std::f64::consts::TAU*2.0).sin()*9.0;
+            for dy in -10..=10 {
+                let wx=wrap(m+dx);
+                let wy=wrap(m+center_y.round() as i32+dy);
+                if self.initial_water_surface(wx,wy)>self.height(wx,wy)+1 {
+                    self.water.activate_surface((wx,wy));
+                }
+            }
+        }
+    }
+
     // Coordinates below use toroidal *meters* relative to the map center.
     // The lab is deliberately authored for testable waterways; production
     // geology and climate generation are not being replaced.
@@ -213,6 +233,21 @@ mod tests {
             }
         }
         assert!(transitions>50,"the regression must actually test river shores");
+    }
+    #[test]
+    fn initial_river_is_active_without_expanding_the_ocean_volume() {
+        let mut t=Terrain::new();
+        assert!(t.water.active.is_empty());
+        assert!(t.water.surface_active.is_empty());
+        t.prime_initial_river_flow();
+        assert!(t.water.surface_active.len()>1000);
+        assert!(t.water.surface_active.len()<20000);
+        assert!(t.water.active.is_empty(),
+            "priming a 1km river must not queue deep wet voxels");
+        let initial=t.water.surface_delta_liters;
+        let moved=t.step_water(4096);
+        assert!(moved>0,"an initial downhill river must not be frozen");
+        assert_eq!(t.water.surface_delta_liters,initial);
     }
     #[test]
     fn wrap_edges() {
