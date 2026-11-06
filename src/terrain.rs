@@ -109,6 +109,16 @@ impl Terrain {
                 let bed=surface-2.0+0.1*(x/20.0).sin();
                 let blend=((30.0-distance)/21.0).clamp(0.0,1.0);
                 h=h*(1.0-blend)+h.min(bed)*blend;
+                // The original channel blended its banks down to *below*
+                // the authored water surface, then abruptly stopped filling
+                // water at lateral distance 9m. This created free-standing
+                // multi-meter vertical water walls before simulation began.
+                // Only the open river outside the lake requires raised
+                // banks. The river mouth blends into the equal-level ocean.
+                if distance>9.0 && Self::lake_distance(x,y)>=78.0
+                    && surface>SEA_LEVEL as f64+1.0 {
+                    h=h.max(surface.ceil());
+                }
             }
         }
         // Small dry hummocks and shallow wet pockets in a low marsh basin.
@@ -165,6 +175,33 @@ impl Terrain {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn river_banks_constrain_initial_water_without_free_standing_walls() {
+        let t=Terrain::new();
+        // Every dry column directly beside an authored inland river
+        // column must form a bank at least as high as its water surface.
+        // Lower dry cells create visible 1-15m free water walls at startup.
+        let m=WORLD_SIZE/2;
+        let mut transitions=0;
+        for x in (-105..=300).step_by(7) {
+            for y in -95..=145 {
+                let world=(m+x,m+y);
+                let water=t.initial_water_surface(world.0,world.1);
+                if water<=SEA_LEVEL+1 {continue;}
+                if Self::lake_distance(x as f64,y as f64)<78.0 {continue;}
+                if t.height(world.0,world.1)+1>=water {continue;}
+                for (dx,dy) in [(-1,0),(1,0),(0,-1),(0,1)] {
+                    let nx=world.0+dx;let ny=world.1+dy;
+                    if t.initial_water_surface(nx,ny)>=water {continue;}
+                    let bank=t.height(nx,ny)+1;
+                    assert!(bank>=water,
+                        "river water at ({x},{y}) elevation {water} hangs over dry neighbor ({},{}) bed {bank}",x+dx,y+dy);
+                    transitions+=1;
+                }
+            }
+        }
+        assert!(transitions>50,"the regression must actually test river shores");
+    }
     #[test]
     fn wrap_edges() {
         assert_eq!(wrap(-1), WORLD_SIZE - 1);
