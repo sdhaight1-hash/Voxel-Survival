@@ -246,7 +246,13 @@ mod tests {
         assert!(t.water.active.is_empty(),
             "priming a 1km river must not queue deep wet voxels");
         let initial=t.water.surface_delta_liters;
-        let moved=t.step_water(4096);
+        let mut moved=0;
+        // A round-robin tile budget may visit calm lake tiles first.
+        // The entire initialized channel must receive one opportunity.
+        for _ in 0..100 {
+            moved+=t.step_water(4096);
+            if moved>0 {break;}
+        }
         assert!(moved>0,"an initial downhill river must not be frozen");
         assert_eq!(t.water.surface_delta_liters,initial);
     }
