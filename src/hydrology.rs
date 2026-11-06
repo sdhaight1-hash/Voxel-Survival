@@ -3,6 +3,7 @@
 //! refill rule. Each withdrawn voxel is recorded as a sparse override.
 use crate::terrain::{wrap, Block, Terrain, WORLD_HEIGHT};
 use std::collections::{BTreeSet, HashMap, HashSet, VecDeque};
+use std::ops::Bound::{Excluded, Unbounded};
 
 pub type Cell = (i32, i32, i32);
 pub const CAPACITY_L: u16 = 1000;
@@ -16,6 +17,7 @@ fn neighbors((x,y,z): Cell) -> [Cell;6] {
 pub struct WaterState {
     pub(crate) amounts: HashMap<Cell,u16>,
     pub(crate) active: BTreeSet<Cell>,
+    active_cursor:Option<Cell>,
     pub(crate) dirty: HashSet<Cell>,
     // Atmosphere is an explicitly finite reservoir, not a source of free rain.
     pub atmosphere_liters: u64,
@@ -421,8 +423,18 @@ impl Terrain {
         // An ordered active set lets us take only the budgeted cells.
         // The old HashSet path drained, sorted and reinserted *every*
         // pending cell each tick (over 40k in the reported recording).
-        let pending:Vec<Cell>=self.water.active.iter()
-            .take(max_cells).copied().collect();
+        let budget=max_cells.min(self.water.active.len());
+        let mut pending=Vec::with_capacity(budget);
+        // Round-robin over the ordered set: repeatedly disturbed low-X
+        // cells must not starve the other active regions indefinitely.
+        if let Some(last)=self.water.active_cursor {
+            pending.extend(self.water.active.range((Excluded(last),Unbounded))
+                .take(budget).copied());
+        }
+        if pending.len()<budget {
+            pending.extend(self.water.active.iter().take(budget-pending.len()).copied());
+        }
+        if let Some(&last)=pending.last() {self.water.active_cursor=Some(last);}
         for &cell in &pending {self.water.active.remove(&cell);}
         let mut transfers=0;
         let mut processed=Vec::new();
@@ -781,6 +793,19 @@ mod tests {
         assert!(count>=500,"budget fixture must contain many dry cells");
         assert_eq!(t.step_water(17),0);
         assert_eq!(t.water.active.len(),count-17);
+    }
+    #[test]
+    fn water_work_budget_rotates_instead_of_starving_later_cells() {
+        let mut t=Terrain::new();
+        t.water.active.clear();
+        let y=WORLD_SIZE/2;
+        for x in 0..10 {t.water.active.insert((x,y,240));}
+        t.step_water(3);
+        assert!(!t.water.active.contains(&(0,y,240)));
+        for x in 0..3 {t.water.active.insert((x,y,240));}
+        t.step_water(3);
+        assert!(t.water.active.contains(&(0,y,240)));
+        for x in 3..6 {assert!(!t.water.active.contains(&(x,y,240)));}
     }
     #[test]
     fn dry_active_neighbors_are_not_hydraulic_sources() {
