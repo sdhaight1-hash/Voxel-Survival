@@ -1200,37 +1200,46 @@ mod movement_tests {
     #[test]
     fn ray_targets_solid_through_water_for_underwater_mining_and_placement() {
         let mut t=Terrain::new();
-        let x=WORLD_SIZE/2;
-        let y=WORLD_SIZE/2;
-        t.set(x+2,y,241,Block::Stone);
+        let m=WORLD_SIZE/2;let y=m;
+        let x=(m-20..m+20).find(|&x|
+            t.height(x,y)==t.height(x+1,y)
+            &&t.height(x,y)==t.height(x+2,y))
+            .expect("flat three-column test bed");
+        let bed=t.height(x,y)+1;
+        t.set(x+2,y,bed,Block::Stone);
         t.water.atmosphere_liters=600;
-        assert_eq!(t.precipitate((x+1,y,241),600),600);
-        let mut p=player(x as f32+0.5,y as f32+0.5,240.0);
+        assert_eq!(t.precipitate((x+1,y,bed),600),600);
+        let mut p=player(x as f32+0.5,y as f32+0.5,bed as f32-0.93);
         p.yaw=0.0;
         let (hit,previous)=target_block(&t,&p).expect("submerged wall target");
-        assert_eq!(hit,(x+2,y,241));
-        assert_eq!(previous,(x+1,y,241));
+        assert_eq!(hit,(x+2,y,bed));
+        assert_eq!(previous,(x+1,y,bed));
         assert!(!player_overlaps_cell(&p,previous));
         assert!(t.try_place_solid(previous,Block::Dirt));
-        assert_eq!(t.block(x+1,y,241),Block::Dirt);
-        assert_eq!(t.water.amounts.values().map(|&v|v as u32).sum::<u32>(),600);
-        t.set(x+2,y,241,Block::Air);
-        assert_eq!(t.block(x+2,y,241),Block::Air);
+        assert_eq!(t.block(x+1,y,bed),Block::Dirt);
+        assert_eq!(t.water.surface_delta_liters,600);
+        assert_eq!(t.water_liters(x+1,y,bed+1),600);
+        t.set(x+2,y,bed,Block::Air);
+        assert_eq!(t.block(x+2,y,bed),Block::Air);
     }
 
     #[test]
     fn placement_ray_can_select_water_without_a_solid_backing() {
         let mut t=Terrain::new();
-        let x=WORLD_SIZE/2;
-        let y=WORLD_SIZE/2;
+        let m=WORLD_SIZE/2;let y=m;
+        let x=(m-20..m+20).find(|&x|
+            t.height(x,y)==t.height(x+1,y)
+            &&t.height(x,y)==t.height(x+2,y))
+            .expect("flat three-column test bed");
+        let bed=t.height(x,y)+1;
         t.water.atmosphere_liters=800;
-        t.precipitate((x+2,y,241),800);
-        let mut p=player(x as f32+0.5,y as f32+0.5,240.0);
+        t.precipitate((x+2,y,bed),800);
+        let mut p=player(x as f32+0.5,y as f32+0.5,bed as f32-0.93);
         p.yaw=0.0;
-        assert_eq!(target_water(&t,&p),Some((x+2,y,241)));
-        assert!(!player_overlaps_cell(&p,(x+2,y,241)));
-        assert!(t.try_place_solid((x+2,y,241),Block::Dirt));
-        assert_eq!(t.water.amounts.values().map(|&v|v as u32).sum::<u32>(),800);
+        assert_eq!(target_water(&t,&p),Some((x+2,y,bed)));
+        assert!(!player_overlaps_cell(&p,(x+2,y,bed)));
+        assert!(t.try_place_solid((x+2,y,bed),Block::Dirt));
+        assert_eq!(t.water.surface_delta_liters,800);
     }
 
     #[test]
