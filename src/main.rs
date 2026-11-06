@@ -871,12 +871,13 @@ impl Game {
             let water_clock=Instant::now();
             self.terrain.step_water(4096);
             let ms=water_clock.elapsed().as_secs_f64()*1000.0;
-            if ms>100.0 {
+            if ms>25.0 {
                 eprintln!("hydrology slow water tick: {:.0}ms active={}",
                     ms,self.terrain.water.active.len());
             }
         }
         if self.soil_accumulator >= 0.2 {
+            let climate_clock=Instant::now();
             let elapsed=self.soil_climate_seconds;
             self.soil_accumulator=0.0;
             self.soil_climate_seconds=0.0;
@@ -895,6 +896,11 @@ impl Game {
                 self.player.pos.y.floor() as i32,
                 elapsed,
             );
+            let ms=climate_clock.elapsed().as_secs_f64()*1000.0;
+            if ms>25.0 {
+                eprintln!("hydrology slow climate batch: {:.0}ms soil_active={}",
+                    ms,self.terrain.soil.active_count());
+            }
         }
         let dirty=self.terrain.take_water_dirty();
         if !dirty.is_empty() {self.queue_edited_chunks(&dirty);}
@@ -904,7 +910,7 @@ impl Game {
         let remesh_clock=Instant::now();
         self.flush_queued_chunks();
         let remesh_ms=remesh_clock.elapsed().as_secs_f64()*1000.0;
-        if remesh_ms>40.0 {
+        if remesh_ms>25.0 {
             eprintln!("hydrology slow remesh batch: {:.0}ms queued={}",
                 remesh_ms,self.pending_mesh_chunks.len());
         }
