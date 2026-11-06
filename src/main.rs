@@ -579,7 +579,8 @@ impl Game {
             }),
             multisample:Default::default(),multiview:None,
         });
-        let terrain = Terrain::new();
+        let mut terrain = Terrain::new();
+        terrain.prime_initial_river_flow();
         let player = find_safe_spawn(&terrain);
         let depth = depth_view(&device,size);
         let chunk_offsets = device.create_buffer(&wgpu::BufferDescriptor {
