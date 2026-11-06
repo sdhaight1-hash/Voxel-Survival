@@ -111,7 +111,10 @@ impl Terrain {
         // its central 9m are initially inundated.
         if let Some((distance,surface))=Self::river(x,y) {
             if distance<30.0 {
-                let bed=surface-2.0+0.1*(x/20.0).sin();
+                // Floor the intended riverbed along with the initial
+                // integer-meter stage. Otherwise a rounding boundary can
+                // leave a dry cell in the middle of the flowing channel.
+                let bed=surface.floor()-2.0+0.1*(x/20.0).sin();
                 let blend=((30.0-distance)/21.0).clamp(0.0,1.0);
                 h=h*(1.0-blend)+h.min(bed)*blend;
                 // The original channel blended its banks down to *below*
@@ -197,7 +200,11 @@ mod tests {
                 if t.height(world.0,world.1)+1>=water {continue;}
                 for (dx,dy) in [(-1,0),(1,0),(0,-1),(0,1)] {
                     let nx=world.0+dx;let ny=world.1+dy;
-                    if t.initial_water_surface(nx,ny)>=water {continue;}
+                    // A lower but still flooded downstream river cell
+                    // is a valid sloping channel, not an unsupported wall.
+                    if t.initial_water_surface(nx,ny)>t.height(nx,ny)+1 {
+                        continue;
+                    }
                     let bank=t.height(nx,ny)+1;
                     assert!(bank>=water,
                         "river water at ({x},{y}) elevation {water} hangs over dry neighbor ({},{}) bed {bank}",x+dx,y+dy);
