@@ -2,6 +2,63 @@
 
 **Status:** Experimental design gate and implementation checklist. Not production-ready. Keep `main` untouched; work only on the 1,024 m island branch and draft PR #12. This supersedes the earlier assumption that more per-voxel flow or meshing optimizations alone can make the water behave realistically.
 
+## Implementation checkpoint (2026-11-06)
+
+The user authorized active implementation on the draft experimental branch. These
+items are now in code, not just a research proposal:
+
+- `src/surface_solver.rs`: standalone conservative 2D virtual-pipe momentum
+  kernel with deterministic tests for lake-at-rest, wet/dry dam break, bank
+  overtopping, four-neighbor donor limits, and long-run exact liter conservation.
+  This is a bounded low-order hydraulic prototype, **not** a verified HLLC
+  finite-volume Saint-Venant solver.
+- `src/hydrology.rs`: open-water volume is owned by one packed surface-column
+  ledger backed by finite implicit initial ocean/lake volumes plus sparse
+  deltas. `water_liters` projects that inventory into voxel-facing APIs.
+  Underground excavated cells retain sparse independent 3D water amounts.
+  Source/receiver transfers change the *column inventory*, never independently
+  edit underwater layers. Player-placed solids displace water into available
+  height, and immediate roofs are not misreported as free surfaces.
+- Persistent signed edge velocities are integrated in eight 25ms physical
+  substeps per 0.2s water tick; paired integer-liter transfers are batched in
+  scratch columns and committed once, avoiding intermediate 3D remesh churn.
+  Tiny fractional flows retain remainder and tiles with momentum remain awake.
+- Water simulation activation is now by 32m tile, not every wet 3D voxel or
+  a tens-of-thousands-entry BTreeSet of square-meter columns. Soil and
+  groundwater schedulers also use bounded, fair ordered cursors.
+- `src/mesh.rs`: open water renders one top quad per wet 1m² surface column,
+  plus exposed interface sides, rather than stacking transparent cubic
+  water faces through a deep ocean. Sparse excavated 3D water still has local
+  faces.
+- Regressions cover mass exchanges, toroidal seam, submerged block
+  displacement, lake height, lake-rest stability, dry banks, roofs, caves,
+  atmospheric conservation and rain.
+
+**Known unverified limitations:**
+
+1. Graphics are still the existing basic WGPU alpha-blended water shader. The
+   new water surface has flat 1m quads, with visible shallow-water and river
+   steps until edge interpolation, depth/underwater attenuation and wet/dry
+   clipping are implemented.
+2. Surface momentum is a simple virtual-pipe approximation; river discharge
+   and hydraulic equilibrium need stronger time-step and benchmark checks,
+   especially at large jumps, culverts and blocked columns.
+3. The sparse 3D cave/conduit transfer remains the older prototype. It is not
+   yet a general bidirectional conservation-tested pressure graph with
+   explicit exchanges for stacked water reservoirs.
+4. F1 scales the Af climate subsystem but does **not** accelerate 5Hz hydraulic
+   flow; long-term catchment balance needs a multirate reservoir method.
+5. Regional rain and evaporation still run only near the player. The
+   month-by-month whole-island Af target is not validated.
+6. Windows and Ubuntu CI exercises source-level correctness; actual FPS,
+   remaining underwater visual faults and water walls require the next
+   hands-on gameplay video. No claims of 60fps or completed hydrology are
+   justified by CI alone.
+
+**Release guardrail:** No merge to `main` until a video and quantitative
+performance review confirm the new solver and water rendering are materially
+better, with no new regression.
+
 ## Observation, not conjecture
 
 The November 6 video (09:30 recording) shows a free-standing vertical water sheet at startup, irregular thin/overlapping underwater water panels, and stepwise water faces against low banks. The release console reports startup 0.7s, water tick 25–36ms with 35k–52k active voxel cells, climate/soil batch 26–29ms, and dynamic remesh 26–37ms. There is no reported panic. The video shows *behavioral* correctness failure, not merely a GPU throughput problem.
