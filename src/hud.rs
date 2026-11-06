@@ -103,7 +103,7 @@ pub fn rasterize(yaw:f32,x:f64,y:f64,z:f64,fps:f32,frame_ms:f32,
         &format!("F1 {:>4}x DAY {} {:02}:{:02}",time_scale,day,minutes/60,minutes%60),
         ACCENT,1);
     text(&mut out,INFO_X+12,85,
-        &format!("WATER {:04}L ACT {} M{:02}:{}mm",water_liters,active_cells,
+        &format!("WATER {:04}L TILES {} M{:02}:{}mm",water_liters,active_cells,
             rain_month+1,rain_gauge_mm.map_or("--".to_string(),|n|n.to_string())),WHITE,1);
     text(&mut out,INFO_X+12,103,
         &format!("D{:+}L R{}L MISS{}L",surface_delta_liters,rain_liters,unmet_rain_liters),
