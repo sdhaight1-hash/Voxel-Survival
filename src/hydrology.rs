@@ -2,7 +2,7 @@
 //! The initial ocean is a finite implicit volume field, never an infinite
 //! refill rule. Each withdrawn voxel is recorded as a sparse override.
 use crate::terrain::{wrap, Block, Terrain, WORLD_HEIGHT};
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::collections::{BTreeSet, HashMap, HashSet, VecDeque};
 
 pub type Cell = (i32, i32, i32);
 pub const CAPACITY_L: u16 = 1000;
@@ -15,7 +15,7 @@ fn neighbors((x,y,z): Cell) -> [Cell;6] {
 #[derive(Default)]
 pub struct WaterState {
     pub(crate) amounts: HashMap<Cell,u16>,
-    pub(crate) active: HashSet<Cell>,
+    pub(crate) active: BTreeSet<Cell>,
     pub(crate) dirty: HashSet<Cell>,
     // Atmosphere is an explicitly finite reservoir, not a source of free rain.
     pub atmosphere_liters: u64,
@@ -222,7 +222,16 @@ impl Terrain {
         }
         self.water.amounts.insert(cell,new_amount);
         self.water.dirty.insert(cell);
-        self.water.activate(cell);
+        // A liquid edit only needs to wake wet neighbors. Queuing all
+        // six dry/solid neighbors on every sub-liter flow created enormous
+        // active backlogs near the lake and ate frame time.
+        for nearby in std::iter::once(cell).chain(neighbors(cell)) {
+            let nearby=canonical(nearby);
+            if (0..WORLD_HEIGHT).contains(&nearby.2)
+                && self.water_liters(nearby.0,nearby.1,nearby.2)>0 {
+                self.water.active.insert(nearby);
+            }
+        }
         self.soil.activate((cell.0,cell.1));
     }
     pub fn take_water_dirty(&mut self) -> HashSet<Cell> {
@@ -409,15 +418,15 @@ impl Terrain {
     /// ocean water, including when the chunk is unloaded and later revisited.
     /// Returns the number of transfers for mesh invalidation.
     pub fn step_water(&mut self, max_cells:usize) -> usize {
-        let mut pending:Vec<Cell>=self.water.active.drain().collect();
-        pending.sort_unstable();
+        // An ordered active set lets us take only the budgeted cells.
+        // The old HashSet path drained, sorted and reinserted *every*
+        // pending cell each tick (over 40k in the reported recording).
+        let pending:Vec<Cell>=self.water.active.iter()
+            .take(max_cells).copied().collect();
+        for &cell in &pending {self.water.active.remove(&cell);}
         let mut transfers=0;
         let mut processed=Vec::new();
-        for (i,cell) in pending.into_iter().enumerate() {
-            if i>=max_cells {
-                self.water.active.insert(cell);
-                continue;
-            }
+        for cell in pending {
             if self.water_liters(cell.0,cell.1,cell.2)==0 {continue;}
             // Only wet cells can drive hydraulic gradients or conduits.
             // Previously thousands of dry/solid neighbors entered the
@@ -750,6 +759,28 @@ mod tests {
         t.add_surface_liters((x,y),45,bed);
         assert_eq!(t.water_liters(x,y,bed),45);
         assert_eq!(t.water.surface_delta_liters,before+45);
+    }
+    #[test]
+    fn water_changes_only_wake_wet_neighbors() {
+        let mut t=Terrain::new();
+        let x=WORLD_SIZE/2;let y=WORLD_SIZE/2;
+        let z=t.height(x,y)+1;
+        t.water_assign((x,y,z),100);
+        assert_eq!(t.water.active.len(),1);
+        assert!(t.water.active.contains(&(x,y,z)));
+    }
+    #[test]
+    fn hydrology_tick_obeys_active_budget_without_draining_backlog() {
+        let mut t=Terrain::new();
+        let x=WORLD_SIZE/2;let y=WORLD_SIZE/2;
+        t.water.active.clear();
+        for dx in 0..5000 {
+            t.water.active.insert((wrap(x+dx),y,240));
+        }
+        let count=t.water.active.len();
+        assert!(count>=500,"budget fixture must contain many dry cells");
+        assert_eq!(t.step_water(17),0);
+        assert_eq!(t.water.active.len(),count-17);
     }
     #[test]
     fn dry_active_neighbors_are_not_hydraulic_sources() {
