@@ -19,8 +19,13 @@ pub struct WaterState {
     // Spatial index for rebuilding only affected water meshes. Without
     // this, each changed chunk scans every modified water cell island-wide.
     pub(crate) changed_by_chunk: HashMap<(i32,i32),HashSet<Cell>>,
+    // Surface water has one active item per horizontal column, no matter
+    // how many meters deep the ocean is. Voxel activity is kept for local
+    // excavation/cave gravity and pressure only.
     pub(crate) active: BTreeSet<Cell>,
     active_cursor:Option<Cell>,
+    pub(crate) surface_active:BTreeSet<(i32,i32)>,
+    surface_cursor:Option<(i32,i32)>,
     pub(crate) dirty: HashSet<Cell>,
     // Atmosphere is an explicitly finite reservoir, not a source of free rain.
     pub atmosphere_liters: u64,
@@ -36,6 +41,11 @@ pub struct WaterState {
     pub(crate) blocked_surface_columns:HashSet<(i32,i32)>,
 }
 impl WaterState {
+    pub fn activate_surface(&mut self,(x,y):(i32,i32)) {
+        for (dx,dy) in [(0,0),(-1,0),(1,0),(0,-1),(0,1)] {
+            self.surface_active.insert((wrap(x+dx),wrap(y+dy)));
+        }
+    }
     pub fn activate(&mut self, at:Cell) {
         let at=canonical(at);
         self.active.insert(at);
@@ -127,9 +137,9 @@ impl Terrain {
     /// Schedule conservative edge transfers from the same snapshot. All
     /// fluxes are committed after the calculations, avoiding iteration-order
     /// dependent hydraulic head changes within one step.
-    fn step_surface_flow(&mut self,active_cells:&[Cell]) -> usize {
+    fn step_surface_flow(&mut self,active_columns:&[(i32,i32)]) -> usize {
         let mut touched=HashSet::new();
-        for &(x,y,_) in active_cells {
+        for &(x,y) in active_columns {
             for (dx,dy) in [(0,0),(-1,0),(1,0),(0,-1),(0,1)] {
                 touched.insert((wrap(x+dx),wrap(y+dy)));
             }
@@ -167,7 +177,10 @@ impl Terrain {
                     .saturating_sub(*received.get(&to).unwrap_or(&0));
                 // Damped, bounded hydrostatic flux. Momentum will be added
                 // separately for fast rivers, waterfalls and floods.
-                let requested=(difference*500.0).ceil() as u32;
+                // Integer liters need a real volume threshold; ceil()
+                // previously made even a microscopic gradient transfer
+                // 1L forever, reactivating calm ocean cells endlessly.
+                let requested=(difference*500.0).floor() as u32;
                 let liters=requested.min(250).min(available).min(free);
                 if liters==0 {continue;}
                 *taken.entry(from).or_default()+=liters;
@@ -205,7 +218,8 @@ impl Terrain {
         let change=new_amount as i64-old as i64;
         if change==0 {return;}
         self.water.surface_delta_liters+=change;
-        if cell.2>self.height(cell.0,cell.1) {
+        let ground=self.height(cell.0,cell.1);
+        if cell.2>ground {
             *self.water.surface_column_delta.entry((cell.0,cell.1)).or_default()+=change;
             if new_amount>0 {
                 self.water.highest_modified_wet_z.entry((cell.0,cell.1))
@@ -230,14 +244,24 @@ impl Terrain {
             cell.1.div_euclid(crate::terrain::CHUNK_SIZE)*crate::terrain::CHUNK_SIZE);
         self.water.changed_by_chunk.entry(chunk).or_default().insert(cell);
         self.water.dirty.insert(cell);
-        // A liquid edit only needs to wake wet neighbors. Queuing all
-        // six dry/solid neighbors on every sub-liter flow created enormous
-        // active backlogs near the lake and ate frame time.
-        for nearby in std::iter::once(cell).chain(neighbors(cell)) {
-            let nearby=canonical(nearby);
-            if (0..WORLD_HEIGHT).contains(&nearby.2)
-                && self.water_liters(nearby.0,nearby.1,nearby.2)>0 {
-                self.water.active.insert(nearby);
+        if cell.2>ground {
+            // Open water flow is 2D. Do not activate every submerged 3D
+            // neighbor on each tiny water transfer.
+            self.water.activate_surface((cell.0,cell.1));
+            // Exception: a water cell hanging over a mined/open cavity
+            // still needs the local 3D falling-water adapter.
+            if cell.2>0 && self.water_liters(cell.0,cell.1,cell.2-1)==0
+                && !self.block(cell.0,cell.1,cell.2-1).solid() {
+                self.water.active.insert(cell);
+            }
+        } else {
+            // Underground edits still need local six-direction connectivity.
+            for nearby in std::iter::once(cell).chain(neighbors(cell)) {
+                let nearby=canonical(nearby);
+                if (0..WORLD_HEIGHT).contains(&nearby.2)
+                    && self.water_liters(nearby.0,nearby.1,nearby.2)>0 {
+                    self.water.active.insert(nearby);
+                }
             }
         }
         self.soil.activate((cell.0,cell.1));
@@ -469,7 +493,22 @@ impl Terrain {
                 }
             }
         }
-        transfers+=self.step_surface_flow(&processed);
+        // Work on distinct horizontal wet columns, not every voxel in
+        // their depth. The column scheduler uses the same round-robin
+        // fairness as the sparse underground voxel queue.
+        let column_budget=self.water.surface_active.len().min(max_cells);
+        let mut columns=Vec::with_capacity(column_budget);
+        if let Some(last)=self.water.surface_cursor {
+            columns.extend(self.water.surface_active
+                .range((Excluded(last),Unbounded)).take(column_budget).copied());
+        }
+        if columns.len()<column_budget {
+            columns.extend(self.water.surface_active.iter()
+                .take(column_budget-columns.len()).copied());
+        }
+        if let Some(&last)=columns.last() {self.water.surface_cursor=Some(last);}
+        for &cell in &columns {self.water.surface_active.remove(&cell);}
+        transfers+=self.step_surface_flow(&columns);
         transfers+self.step_conduit_pressure(&processed)
     }
     /// Evaporation transfers liquid to atmosphere; precipitation reverses it.
@@ -629,9 +668,9 @@ mod tests {
     fn level_lake_and_ocean_never_spontaneously_flow() {
         let mut t=Terrain::new();
         let lake=(WORLD_SIZE/2-115,WORLD_SIZE/2+125,125);
-        t.water.activate(lake);
+        t.water.activate_surface((lake.0,lake.1));
         let ocean=(0,0,109);
-        t.water.activate(ocean);
+        t.water.activate_surface((ocean.0,ocean.1));
         for _ in 0..10_000 {
             assert_eq!(t.step_water(4096),0);
         }
@@ -653,7 +692,7 @@ mod tests {
         let mut has_flow=false;
         for _ in 0..100 {
             if t.step_water(4096)>0 {has_flow=true;}
-            if t.water.active.is_empty(){break;}
+            if t.water.active.is_empty() && t.water.surface_active.is_empty(){break;}
         }
         assert!(has_flow,"spill should move according to head");
         assert_eq!(t.water.surface_delta_liters,initial_delta,
@@ -803,13 +842,14 @@ mod tests {
         assert_eq!(t.water.surface_delta_liters,before+45);
     }
     #[test]
-    fn water_changes_only_wake_wet_neighbors() {
+    fn water_changes_wake_columns_not_stacks_of_voxels() {
         let mut t=Terrain::new();
         let x=WORLD_SIZE/2;let y=WORLD_SIZE/2;
         let z=t.height(x,y)+1;
         t.water_assign((x,y,z),100);
-        assert_eq!(t.water.active.len(),1);
-        assert!(t.water.active.contains(&(x,y,z)));
+        assert!(t.water.active.is_empty());
+        assert_eq!(t.water.surface_active.len(),5);
+        assert!(t.water.surface_active.contains(&(x,y)));
     }
     #[test]
     fn hydrology_tick_obeys_active_budget_without_draining_backlog() {
@@ -850,6 +890,30 @@ mod tests {
         t.water_assign((0,y,240),400);
         assert_eq!(t.water.changed_by_chunk[&right].len(),1,
             "editing the same cell must not duplicate mesh-index entries");
+    }
+    #[test]
+    fn deep_surface_water_activation_does_not_multiply_with_depth() {
+        let mut t=Terrain::new();
+        let x=0;let y=0;
+        let bed=t.height(x,y)+1;
+        assert!(t.initial_water_surface(x,y)-bed>20);
+        for z in bed..t.initial_water_surface(x,y) {
+            t.water_assign((x,y,z),999);
+        }
+        assert!(t.water.active.len()<=1,
+            "ocean depth must not multiply surface update work");
+        assert_eq!(t.water.surface_active.len(),5);
+    }
+    #[test]
+    fn low_head_difference_does_not_churn_a_liter_forever() {
+        let mut t=Terrain::new();
+        let x=WORLD_SIZE/2;let y=WORLD_SIZE/2;
+        let z=t.height(x,y)+1;
+        t.water_assign((x,y,z),100);
+        let prior=t.water.surface_delta_liters;
+        for _ in 0..20 {t.step_water(4096);}
+        assert_eq!(t.water.surface_delta_liters,prior);
+        assert!(t.water.surface_active.len()<20);
     }
     #[test]
     fn dry_active_neighbors_are_not_hydraulic_sources() {
