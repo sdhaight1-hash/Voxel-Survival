@@ -16,6 +16,9 @@ fn neighbors((x,y,z): Cell) -> [Cell;6] {
 #[derive(Default)]
 pub struct WaterState {
     pub(crate) amounts: HashMap<Cell,u16>,
+    // Spatial index for rebuilding only affected water meshes. Without
+    // this, each changed chunk scans every modified water cell island-wide.
+    pub(crate) changed_by_chunk: HashMap<(i32,i32),HashSet<Cell>>,
     pub(crate) active: BTreeSet<Cell>,
     active_cursor:Option<Cell>,
     pub(crate) dirty: HashSet<Cell>,
@@ -223,6 +226,9 @@ impl Terrain {
             }
         }
         self.water.amounts.insert(cell,new_amount);
+        let chunk=(cell.0.div_euclid(crate::terrain::CHUNK_SIZE)*crate::terrain::CHUNK_SIZE,
+            cell.1.div_euclid(crate::terrain::CHUNK_SIZE)*crate::terrain::CHUNK_SIZE);
+        self.water.changed_by_chunk.entry(chunk).or_default().insert(cell);
         self.water.dirty.insert(cell);
         // A liquid edit only needs to wake wet neighbors. Queuing all
         // six dry/solid neighbors on every sub-liter flow created enormous
@@ -830,6 +836,20 @@ mod tests {
         t.step_water(3);
         assert!(t.water.active.contains(&(0,y,240)));
         for x in 3..6 {assert!(!t.water.active.contains(&(x,y,240)));}
+    }
+    #[test]
+    fn modified_water_cells_are_indexed_by_canonical_chunk() {
+        let mut t=Terrain::new();
+        let y=WORLD_SIZE/2;
+        t.water_assign((-1,y,240),100);
+        t.water_assign((0,y,240),200);
+        let left=(WORLD_SIZE-32,y);
+        let right=(0,y);
+        assert!(t.water.changed_by_chunk[&left].contains(&(WORLD_SIZE-1,y,240)));
+        assert!(t.water.changed_by_chunk[&right].contains(&(0,y,240)));
+        t.water_assign((0,y,240),400);
+        assert_eq!(t.water.changed_by_chunk[&right].len(),1,
+            "editing the same cell must not duplicate mesh-index entries");
     }
     #[test]
     fn dry_active_neighbors_are_not_hydraulic_sources() {
