@@ -1,6 +1,9 @@
 mod mesh;
 mod terrain;
 mod hydrology;
+mod surface_solver;
+mod soil;
+mod atmosphere;
 mod geoscience;
 mod hud;
 
@@ -287,7 +290,9 @@ struct ChunkGpu {
     vertices: wgpu::Buffer,
     indices: wgpu::Buffer,
     opaque_count: u32,
-    count: u32,
+    water_vertices: wgpu::Buffer,
+    water_indices: wgpu::Buffer,
+    water_count: u32,
 }
 
 struct Game {
@@ -306,9 +311,14 @@ struct Game {
     camera_bind: wgpu::BindGroup,
     texture_bind: wgpu::BindGroup,
     chunks: Vec<ChunkGpu>,
+    // Changed water faces can touch many chunks in one simulation tick.
+    // Coalesce those changes and remesh a fixed number per render frame.
+    pending_mesh_chunks: HashSet<(i32,i32)>,
+    mesh_refresh_cursor: usize,
     chunk_offsets: wgpu::Buffer,
     mesh_origin: (i32, i32),
     terrain: Terrain,
+    atmosphere: atmosphere::Atmosphere,
     player: Player,
     selected: Block,
     keys: HashSet<KeyCode>,
@@ -321,6 +331,8 @@ struct Game {
     hud_frame_ms: f32,
     physics_accumulator: f32,
     water_accumulator: f32,
+    soil_accumulator: f32,
+    soil_climate_seconds: f64,
     world_time_seconds: f64,
     time_scale: u32,
     surface_temperature: geoscience::ThermalCell,
@@ -340,6 +352,7 @@ fn depth_view(device: &wgpu::Device, size: PhysicalSize<u32>) -> wgpu::TextureVi
 
 impl Game {
     async fn new(window: Arc<winit::window::Window>) -> Self {
+        let startup_clock=Instant::now();
         // Explicit Vulkan backend as requested; no OpenGL/DX12 fallback.
         let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
             backends: wgpu::Backends::VULKAN, ..Default::default()
@@ -354,6 +367,8 @@ impl Game {
             label: Some("voxel GPU"), required_features: wgpu::Features::empty(),
             required_limits: wgpu::Limits::default(),
         }, None).await.expect("Create GPU device");
+        eprintln!("hydrology startup: Vulkan device ready in {:.1}s",
+            startup_clock.elapsed().as_secs_f64());
         let size = window.inner_size();
         let mut config = surface.get_default_config(&adapter,size.width.max(1),size.height.max(1))
             .expect("Surface configuration");
@@ -565,7 +580,8 @@ impl Game {
             }),
             multisample:Default::default(),multiview:None,
         });
-        let terrain = Terrain::new();
+        let mut terrain = Terrain::new();
+        terrain.prime_initial_river_flow();
         let player = find_safe_spawn(&terrain);
         let depth = depth_view(&device,size);
         let chunk_offsets = device.create_buffer(&wgpu::BufferDescriptor {
@@ -578,35 +594,90 @@ impl Game {
             depth,
             camera_buffer,camera_bind,texture_bind,
             chunks:Vec::new(),chunk_offsets,
-            mesh_origin:(0,0),terrain,player,selected:Block::Dirt,
+            pending_mesh_chunks:HashSet::new(),mesh_refresh_cursor:0,
+            mesh_origin:(0,0),terrain,
+            atmosphere:atmosphere::Atmosphere::new_af(),
+            player,selected:Block::Dirt,
             keys:HashSet::new(),mouse_captured:false,last_frame:Instant::now(),
             hud_frame_seconds:0.0,hud_elapsed:0.0,hud_frames:0,hud_fps:0.0,hud_frame_ms:0.0,
             physics_accumulator:0.0,water_accumulator:0.0,
+            soil_accumulator:0.0,soil_climate_seconds:0.0,
             world_time_seconds:0.0,time_scale:1,
             surface_temperature:geoscience::ThermalCell {temperature_c:15.0},
             sunlight:1.0,
         };
+        let mesh_clock=Instant::now();
         game.rebuild();
+        eprintln!("hydrology startup: initial chunk meshes {:.0}ms; total {:.1}s",
+            mesh_clock.elapsed().as_secs_f64()*1000.0,
+            startup_clock.elapsed().as_secs_f64());
         game.upload_hud();
         game
     }
 
+    /// Dynamic liquid occupies separate GPU buffers. A changing water level
+    /// must never force rebuilding static stone/soil faces in the same chunk.
+    fn water_buffers(&self, mesh:&mesh::Mesh)->(wgpu::Buffer,wgpu::Buffer,u32) {
+        let vertices=if mesh.vertices.is_empty() {
+            self.device.create_buffer(&wgpu::BufferDescriptor {
+                label:Some("empty chunk water vertices"),
+                size:std::mem::size_of::<mesh::Vertex>() as u64,
+                usage:wgpu::BufferUsages::VERTEX,
+                mapped_at_creation:false,
+            })
+        } else {
+            self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label:Some("chunk water vertices"),
+                contents:bytemuck::cast_slice(&mesh.vertices),
+                usage:wgpu::BufferUsages::VERTEX,
+            })
+        };
+        let indices=if mesh.indices.is_empty() {
+            self.device.create_buffer(&wgpu::BufferDescriptor {
+                label:Some("empty chunk water indices"),size:4,
+                usage:wgpu::BufferUsages::INDEX,mapped_at_creation:false,
+            })
+        } else {
+            self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label:Some("chunk water indices"),
+                contents:bytemuck::cast_slice(&mesh.indices),
+                usage:wgpu::BufferUsages::INDEX,
+            })
+        };
+        (vertices,indices,mesh.indices.len() as u32)
+    }
+
     fn gpu_chunk(&self,x:i32,y:i32) -> ChunkGpu {
-        let mesh=mesh::build(&self.terrain,x,y,0);
+        let solid=mesh::build(&self.terrain,x,y,0);
+        let water=mesh::build_water(&self.terrain,x,y,0);
+        let (water_vertices,water_indices,water_count)=self.water_buffers(&water);
         ChunkGpu {
             origin:(terrain::wrap(x),terrain::wrap(y)),
-            opaque_count:mesh.water_index_start,
-            count:mesh.indices.len() as u32,
+            opaque_count:solid.water_index_start,
             vertices:self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                label:Some("chunk vertices"),
-                contents:bytemuck::cast_slice(&mesh.vertices),
+                label:Some("chunk opaque vertices"),
+                contents:bytemuck::cast_slice(&solid.vertices),
                 usage:wgpu::BufferUsages::VERTEX,
             }),
             indices:self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                label:Some("chunk indices"),
-                contents:bytemuck::cast_slice(&mesh.indices),
+                label:Some("chunk opaque indices"),
+                contents:bytemuck::cast_slice(&solid.indices),
                 usage:wgpu::BufferUsages::INDEX,
             }),
+            water_vertices,water_indices,water_count,
+        }
+    }
+
+    /// Solid terrain edits are infrequent and may change opaque topology.
+    /// Unlike climate-driven liquid changes, those require a full rebuild.
+    fn refresh_solid_edit_chunks(&mut self,changed:&HashSet<(i32,i32,i32)>) {
+        let affected=Self::changed_chunk_origins(changed);
+        let visible:Vec<_>=self.chunks.iter().enumerate()
+            .filter(|(_,chunk)|affected.contains(&chunk.origin))
+            .map(|(i,chunk)|(i,chunk.origin)).collect();
+        for (i,(x,y)) in visible {
+            self.chunks[i]=self.gpu_chunk(x,y);
+            self.pending_mesh_chunks.remove(&(x,y));
         }
     }
 
@@ -642,24 +713,81 @@ impl Game {
         });
     }
 
-    // A changed voxel also affects visible faces across the adjacent border.
-    fn refresh_edited_chunks(&mut self, changed:&HashSet<(i32,i32,i32)>) {
-        let affected:Vec<(usize,i32,i32)>=self.chunks.iter().enumerate()
-            .filter(|(_,chunk)| changed.iter().any(|&(x,y,_)| {
-                let dx=terrain::delta(x,chunk.origin.0);
-                let dy=terrain::delta(y,chunk.origin.1);
-                (-1..=32).contains(&dx) && (-1..=32).contains(&dy)
-            }))
-            .map(|(index,chunk)|(index,chunk.origin.0,chunk.origin.1))
-            .collect();
-        for (index,x,y) in affected {
-            self.chunks[index]=self.gpu_chunk(x,y);
+    // Water modifications can change the face of a neighboring chunk.
+    // Return at most four distinct touched chunk origins per changed cell.
+    fn changed_chunk_origins(changed:&HashSet<(i32,i32,i32)>)
+        ->HashSet<(i32,i32)> {
+        fn origin(n:i32)->i32 {
+            terrain::wrap(n).div_euclid(terrain::CHUNK_SIZE)*terrain::CHUNK_SIZE
         }
+        let mut result=HashSet::new();
+        for &(x,y,_) in changed {
+            let current_x=origin(x);
+            let current_y=origin(y);
+            let nearby_x=[origin(x-1),current_x,origin(x+1)];
+            let nearby_y=[origin(y-1),current_y,origin(y+1)];
+            for xx in nearby_x {for yy in nearby_y {
+                result.insert((xx,yy));
+            }}
+        }
+        result
+    }
+
+    fn queue_edited_chunks(&mut self,changed:&HashSet<(i32,i32,i32)>) {
+        self.pending_mesh_chunks.extend(Self::changed_chunk_origins(changed));
+    }
+
+    /// Avoid blocking one frame for 49 chunk rebuilds. In the recorded
+    /// regression this took 100-243ms, even after the water solver passed.
+    /// A round-robin budget ensures distant visible chunks are eventually
+    /// refreshed instead of starving under continuous near-player motion.
+    fn flush_queued_chunks(&mut self) {
+        const MAX_CHUNKS_PER_FRAME:usize=2;
+        let count=self.chunks.len();
+        if count==0 || self.pending_mesh_chunks.is_empty() {return;}
+        // Only currently visible chunk meshes matter. Walking into a new
+        // chunk already builds unseen chunks from the current terrain state.
+        let visible:HashSet<_>=self.chunks.iter().map(|c|c.origin).collect();
+        self.pending_mesh_chunks.retain(|key|visible.contains(key));
+        let start=self.mesh_refresh_cursor%count;
+        let mut next=start;
+        let mut rebuilt=0;
+        for step in 0..count {
+            if rebuilt>=MAX_CHUNKS_PER_FRAME {break;}
+            let i=(start+step)%count;
+            let (x,y)=self.chunks[i].origin;
+            if !self.pending_mesh_chunks.remove(&(x,y)) {continue;}
+            let water=mesh::build_water(&self.terrain,x,y,0);
+            let (vertices,indices,water_count)=self.water_buffers(&water);
+            self.chunks[i].water_vertices=vertices;
+            self.chunks[i].water_indices=indices;
+            self.chunks[i].water_count=water_count;
+            rebuilt+=1;
+            next=(i+1)%count;
+        }
+        self.mesh_refresh_cursor=next;
     }
     fn upload_hud(&self) {
+        let eye_cell=(self.player.eye().x.floor() as i32,
+            self.player.eye().y.floor() as i32,self.player.eye().z.floor() as i32);
+        let sample=target_water(&self.terrain,&self.player).unwrap_or(eye_cell);
+        let water_liters=self.terrain.water_liters(sample.0,sample.1,sample.2);
         let data=hud::rasterize(self.player.yaw,self.player.pos.x,
             self.player.pos.y,self.player.pos.z,
-            self.hud_fps,self.hud_frame_ms,self.time_scale,self.world_time_seconds);
+            self.hud_fps,self.hud_frame_ms,self.time_scale,self.world_time_seconds,
+            water_liters,
+            self.terrain.water.surface_tiles.len(),
+            self.terrain.water.surface_delta_liters,self.terrain.water.atmosphere_liters,
+            self.terrain.water_mass_error_liters()
+                +self.atmosphere.water_delta_kg().round() as i64,
+            self.atmosphere.relative_humidity(sample.0,sample.1),
+            self.atmosphere.cells[atmosphere::Atmosphere::cell_index(sample.0,sample.1)].temperature_c,
+            self.atmosphere.rain_delivered_liters,self.atmosphere.rain_unmet_liters,
+            (self.atmosphere.time_seconds/(10.0*86_400.0)).floor() as usize%12,
+            self.atmosphere.rain_gauge_mm(
+                self.player.pos.x.floor() as i32,
+                self.player.pos.y.floor() as i32,
+                (self.atmosphere.time_seconds/(10.0*86_400.0)).floor() as usize%12));
         self.queue.write_texture(
             wgpu::ImageCopyTexture {
                 texture:&self.hud_texture,mip_level:0,
@@ -703,6 +831,8 @@ impl Game {
         let prior_time=self.world_time_seconds;
         let advanced=frame_dt as f64*self.time_scale as f64;
         self.world_time_seconds+=advanced;
+        self.soil_accumulator+=frame_dt;
+        self.soil_climate_seconds+=advanced*72.0;
         // One 20-minute calendar day corresponds to 86,400 climatic seconds.
         // Substep heat integration so 1000x never applies an enormous dt.
         let thermal_seconds=advanced*72.0;
@@ -741,13 +871,53 @@ impl Game {
         self.water_accumulator += frame_dt;
         if self.water_accumulator >= 0.2 {
             self.water_accumulator = 0.0;
+            let water_clock=Instant::now();
             self.terrain.step_water(4096);
-            let dirty=self.terrain.take_water_dirty();
-            if !dirty.is_empty() {self.refresh_edited_chunks(&dirty);}
+            let ms=water_clock.elapsed().as_secs_f64()*1000.0;
+            if ms>25.0 {
+                eprintln!("hydrology slow water tick: {:.0}ms cave_active={} surface_tiles={}",
+                    ms,self.terrain.water.active.len(),
+                    self.terrain.water.surface_tiles.len());
+            }
         }
+        if self.soil_accumulator >= 0.2 {
+            let climate_clock=Instant::now();
+            let elapsed=self.soil_climate_seconds;
+            self.soil_accumulator=0.0;
+            self.soil_climate_seconds=0.0;
+            self.terrain.step_soil(elapsed,4096);
+            self.terrain.step_groundwater(elapsed,4096);
+            self.atmosphere.advance_af(elapsed);
+            self.atmosphere.evaporate_near(
+                &mut self.terrain,
+                self.player.pos.x.floor() as i32,
+                self.player.pos.y.floor() as i32,
+                elapsed,
+            );
+            self.atmosphere.rain_near(
+                &mut self.terrain,
+                self.player.pos.x.floor() as i32,
+                self.player.pos.y.floor() as i32,
+                elapsed,
+            );
+            let ms=climate_clock.elapsed().as_secs_f64()*1000.0;
+            if ms>25.0 {
+                eprintln!("hydrology slow climate batch: {:.0}ms soil_active={}",
+                    ms,self.terrain.soil.active_count());
+            }
+        }
+        let dirty=self.terrain.take_water_dirty();
+        if !dirty.is_empty() {self.queue_edited_chunks(&dirty);}
         let cx = (self.player.pos.x as i32).div_euclid(32) * 32;
         let cy = (self.player.pos.y as i32).div_euclid(32) * 32;
         if (cx,cy) != self.mesh_origin { self.rebuild(); }
+        let remesh_clock=Instant::now();
+        self.flush_queued_chunks();
+        let remesh_ms=remesh_clock.elapsed().as_secs_f64()*1000.0;
+        if remesh_ms>25.0 {
+            eprintln!("hydrology slow remesh batch: {:.0}ms queued={}",
+                remesh_ms,self.pending_mesh_chunks.len());
+        }
         let eye = self.player.eye();
         let x = (terrain::delta(eye.x.floor() as i32,self.mesh_origin.0) as f64 + eye.x.fract()) as f32;
         let y = (terrain::delta(eye.y.floor() as i32,self.mesh_origin.1) as f64 + eye.y.fract()) as f32;
@@ -787,8 +957,9 @@ impl Game {
             }
             _=>return,
         }
-        changed.extend(self.terrain.take_water_dirty());
-        if !changed.is_empty() {self.refresh_edited_chunks(&changed);}
+        if !changed.is_empty() {self.refresh_solid_edit_chunks(&changed);}
+        let dirty=self.terrain.take_water_dirty();
+        if !dirty.is_empty() {self.queue_edited_chunks(&dirty);}
     }
     fn render(&mut self) -> Result<(),wgpu::SurfaceError> {
         let frame = self.surface.get_current_texture()?;
@@ -826,12 +997,12 @@ impl Game {
             }
             pass.set_pipeline(&self.water_pipeline);
             for (i,chunk) in self.chunks.iter().enumerate() {
-                if chunk.opaque_count==chunk.count {continue;}
-                pass.set_vertex_buffer(0,chunk.vertices.slice(..));
+                if chunk.water_count==0 {continue;}
+                pass.set_vertex_buffer(0,chunk.water_vertices.slice(..));
                 let start=(i*8) as u64;
                 pass.set_vertex_buffer(1,self.chunk_offsets.slice(start..start+8));
-                pass.set_index_buffer(chunk.indices.slice(..),wgpu::IndexFormat::Uint32);
-                pass.draw_indexed(chunk.opaque_count..chunk.count,0,0..1);
+                pass.set_index_buffer(chunk.water_indices.slice(..),wgpu::IndexFormat::Uint32);
+                pass.draw_indexed(0..chunk.water_count,0,0..1);
             }
             pass.set_pipeline(&self.crosshair_pipeline);
             pass.set_bind_group(0,&self.camera_bind,&[]);
@@ -949,6 +1120,22 @@ mod shader_tests {
 
 #[cfg(test)]
 mod movement_tests {
+    #[test]
+    fn changed_water_faces_invalidate_only_neighboring_chunks() {
+        let mut changed=HashSet::new();
+        changed.insert((15,15,120));
+        let chunks=Game::changed_chunk_origins(&changed);
+        assert_eq!(chunks,HashSet::from([(0,0)]));
+        changed.insert((31,31,120));
+        let chunks=Game::changed_chunk_origins(&changed);
+        assert!(chunks.contains(&(32,32)));
+        assert_eq!(chunks.len(),4);
+        let seam=Game::changed_chunk_origins(&HashSet::from([(0,0,120)]));
+        assert_eq!(seam.len(),4);
+        assert!(seam.contains(&(terrain::WORLD_SIZE-32,terrain::WORLD_SIZE-32)));
+        assert!(seam.contains(&(0,0)));
+    }
+
     use super::*;
 
     fn player(x: f32, y: f32, z: f32) -> Player {
@@ -1013,37 +1200,46 @@ mod movement_tests {
     #[test]
     fn ray_targets_solid_through_water_for_underwater_mining_and_placement() {
         let mut t=Terrain::new();
-        let x=WORLD_SIZE/2;
-        let y=WORLD_SIZE/2;
-        t.set(x+2,y,241,Block::Stone);
+        let m=WORLD_SIZE/2;let y=m;
+        let x=(m-20..m+20).find(|&x|
+            t.height(x,y)==t.height(x+1,y)
+            &&t.height(x,y)==t.height(x+2,y))
+            .expect("flat three-column test bed");
+        let bed=t.height(x,y)+1;
+        t.set(x+2,y,bed,Block::Stone);
         t.water.atmosphere_liters=600;
-        assert_eq!(t.precipitate((x+1,y,241),600),600);
-        let mut p=player(x as f32+0.5,y as f32+0.5,240.0);
+        assert_eq!(t.precipitate((x+1,y,bed),600),600);
+        let mut p=player(x as f32+0.5,y as f32+0.5,bed as f32-0.93);
         p.yaw=0.0;
         let (hit,previous)=target_block(&t,&p).expect("submerged wall target");
-        assert_eq!(hit,(x+2,y,241));
-        assert_eq!(previous,(x+1,y,241));
+        assert_eq!(hit,(x+2,y,bed));
+        assert_eq!(previous,(x+1,y,bed));
         assert!(!player_overlaps_cell(&p,previous));
         assert!(t.try_place_solid(previous,Block::Dirt));
-        assert_eq!(t.block(x+1,y,241),Block::Dirt);
-        assert_eq!(t.water.amounts.values().map(|&v|v as u32).sum::<u32>(),600);
-        t.set(x+2,y,241,Block::Air);
-        assert_eq!(t.block(x+2,y,241),Block::Air);
+        assert_eq!(t.block(x+1,y,bed),Block::Dirt);
+        assert_eq!(t.water.surface_delta_liters,600);
+        assert_eq!(t.water_liters(x+1,y,bed+1),600);
+        t.set(x+2,y,bed,Block::Air);
+        assert_eq!(t.block(x+2,y,bed),Block::Air);
     }
 
     #[test]
     fn placement_ray_can_select_water_without_a_solid_backing() {
         let mut t=Terrain::new();
-        let x=WORLD_SIZE/2;
-        let y=WORLD_SIZE/2;
+        let m=WORLD_SIZE/2;let y=m;
+        let x=(m-20..m+20).find(|&x|
+            t.height(x,y)==t.height(x+1,y)
+            &&t.height(x,y)==t.height(x+2,y))
+            .expect("flat three-column test bed");
+        let bed=t.height(x,y)+1;
         t.water.atmosphere_liters=800;
-        t.precipitate((x+2,y,241),800);
-        let mut p=player(x as f32+0.5,y as f32+0.5,240.0);
+        t.precipitate((x+2,y,bed),800);
+        let mut p=player(x as f32+0.5,y as f32+0.5,bed as f32-0.93);
         p.yaw=0.0;
-        assert_eq!(target_water(&t,&p),Some((x+2,y,241)));
-        assert!(!player_overlaps_cell(&p,(x+2,y,241)));
-        assert!(t.try_place_solid((x+2,y,241),Block::Dirt));
-        assert_eq!(t.water.amounts.values().map(|&v|v as u32).sum::<u32>(),800);
+        assert_eq!(target_water(&t,&p),Some((x+2,y,bed)));
+        assert!(!player_overlaps_cell(&p,(x+2,y,bed)));
+        assert!(t.try_place_solid((x+2,y,bed),Block::Dirt));
+        assert_eq!(t.water.surface_delta_liters,800);
     }
 
     #[test]

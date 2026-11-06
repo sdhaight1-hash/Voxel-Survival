@@ -1,6 +1,8 @@
 use noise::{NoiseFn, Perlin};
 use std::collections::HashMap;
+use std::cell::RefCell;
 use crate::hydrology::WaterState;
+use crate::soil::SoilState;
 
 pub const WORLD_SIZE: i32 = 1_024; // Hydrology lab only; main remains 1,024,000.
 pub const WORLD_HEIGHT: i32 = 256;
@@ -30,11 +32,35 @@ pub fn delta(n: i32, origin: i32) -> i32 {
 
 pub struct Terrain {
     noise: Perlin,
+    // Base height is immutable; repeated flow queries reuse this sample.
+    // Terrain edits remain separate and never invalidate procedural height.
+    height_cache:RefCell<HashMap<(i32,i32),i32>>,
     pub(crate) edits: HashMap<(i32, i32, i32), Block>,
     pub(crate) water: WaterState,
+    pub(crate) soil: SoilState,
 }
 impl Terrain {
-    pub fn new() -> Self { Self { noise: Perlin::new(42), edits: HashMap::new(), water: WaterState::default() } }
+    pub fn new() -> Self { Self { noise: Perlin::new(42), height_cache:RefCell::new(HashMap::new()), edits: HashMap::new(), water: WaterState::default(), soil:SoilState::default() } }
+
+    /// The authored river has a real downhill head gradient at startup.
+    /// Prime only its narrow surface footprint; never activate every
+    /// submerged ocean voxel or a million ocean surface cells.
+    pub fn prime_initial_river_flow(&mut self) {
+        let m=WORLD_SIZE/2;
+        for dx in -125..=365 {
+            let x=dx as f64;
+            let t=((x+115.0)/475.0).clamp(0.0,1.0);
+            let center_y=125.0-190.0*t
+                +(t*std::f64::consts::TAU*2.0).sin()*9.0;
+            for dy in -10..=10 {
+                let wx=wrap(m+dx);
+                let wy=wrap(m+center_y.round() as i32+dy);
+                if self.initial_water_surface(wx,wy)>self.height(wx,wy)+1 {
+                    self.water.activate_surface((wx,wy));
+                }
+            }
+        }
+    }
 
     // Coordinates below use toroidal *meters* relative to the map center.
     // The lab is deliberately authored for testable waterways; production
@@ -66,11 +92,18 @@ impl Terrain {
         if let Some((distance,surface))=Self::river(x,y) {
             if distance<=9.0 {return surface.floor() as i32;}
         }
-        if Self::swamp_distance(x,y)<1.0 {return 115;}
+        // Wetland pools fill connected low ground, including their
+        // transition fringe. The previous hard 1.0-radius cutoff left
+        // physically lower *dry* neighbor cells beside water at Z=115.
+        if Self::swamp_distance(x,y)<1.5
+            && self.height(wrap(x as i32+WORLD_SIZE/2),
+                wrap(y as i32+WORLD_SIZE/2))+1<115 {return 115;}
         SEA_LEVEL
     }
 
     pub fn height(&self,x:i32,y:i32) -> i32 {
+        let key=(wrap(x),wrap(y));
+        if let Some(h)=self.height_cache.borrow().get(&key).copied() {return h;}
         let (x,y)=Self::lab_xy(x,y);
         let radius=x.hypot(y);
         // Broad coastal ramp: ~52m of rise spread across 240m, not the
@@ -98,9 +131,22 @@ impl Terrain {
         // its central 9m are initially inundated.
         if let Some((distance,surface))=Self::river(x,y) {
             if distance<30.0 {
-                let bed=surface-2.0+0.1*(x/20.0).sin();
+                // Floor the intended riverbed along with the initial
+                // integer-meter stage. Otherwise a rounding boundary can
+                // leave a dry cell in the middle of the flowing channel.
+                let bed=surface.floor()-2.0+0.1*(x/20.0).sin();
                 let blend=((30.0-distance)/21.0).clamp(0.0,1.0);
                 h=h*(1.0-blend)+h.min(bed)*blend;
+                // The original channel blended its banks down to *below*
+                // the authored water surface, then abruptly stopped filling
+                // water at lateral distance 9m. This created free-standing
+                // multi-meter vertical water walls before simulation began.
+                // Only the open river outside the lake requires raised
+                // banks. The river mouth blends into the equal-level ocean.
+                if distance>9.0 && Self::lake_distance(x,y)>=78.0
+                    && surface>SEA_LEVEL as f64+1.0 {
+                    h=h.max(surface.ceil());
+                }
             }
         }
         // Small dry hummocks and shallow wet pockets in a low marsh basin.
@@ -110,7 +156,9 @@ impl Terrain {
             let blend=((1.5-swamp)/0.5).clamp(0.0,1.0);
             h=h*(1.0-blend)+h.min(bed)*blend;
         }
-        h.round().clamp(2.0,250.0) as i32
+        let result=h.round().clamp(2.0,250.0) as i32;
+        self.height_cache.borrow_mut().insert(key,result);
+        result
     }
 
     pub fn block(&self, x: i32, y: i32, z: i32) -> Block {
@@ -134,8 +182,19 @@ impl Terrain {
         if block == Block::Water {return;}
         if (0..WORLD_HEIGHT).contains(&z) {
             let cell=(wrap(x),wrap(y),z);
+            let bed=self.height(cell.0,cell.1)+1;
             self.edits.insert(cell,block);
+            if z>=bed {
+                let has_roof=self.edits.iter().any(|(&(ex,ey,ez),&b)|
+                    ex==cell.0 && ey==cell.1 && ez>=bed && b.solid());
+                if has_roof {
+                    self.water.blocked_surface_columns.insert((cell.0,cell.1));
+                } else {
+                    self.water.blocked_surface_columns.remove(&(cell.0,cell.1));
+                }
+            }
             self.water.activate(cell);
+            self.soil.activate((cell.0,cell.1));
         }
     }
 
@@ -144,6 +203,59 @@ impl Terrain {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn river_banks_constrain_initial_water_without_free_standing_walls() {
+        let t=Terrain::new();
+        // Every dry column directly beside an authored inland river
+        // column must form a bank at least as high as its water surface.
+        // Lower dry cells create visible 1-15m free water walls at startup.
+        let m=WORLD_SIZE/2;
+        let mut transitions=0;
+        for x in (-105..=300).step_by(7) {
+            for y in -95..=145 {
+                let world=(m+x,m+y);
+                let water=t.initial_water_surface(world.0,world.1);
+                if water<=SEA_LEVEL+1 {continue;}
+                if Terrain::lake_distance(x as f64,y as f64)<78.0 {continue;}
+                if t.height(world.0,world.1)+1>=water {continue;}
+                for (dx,dy) in [(-1,0),(1,0),(0,-1),(0,1)] {
+                    let nx=world.0+dx;let ny=world.1+dy;
+                    // A lower but still flooded downstream river cell
+                    // is a valid sloping channel, not an unsupported wall.
+                    if t.initial_water_surface(nx,ny)>t.height(nx,ny)+1 {
+                        continue;
+                    }
+                    let bank=t.height(nx,ny)+1;
+                    assert!(bank>=water,
+                        "river water at ({x},{y}) elevation {water} hangs over dry neighbor ({},{}) bed {bank}",x+dx,y+dy);
+                    transitions+=1;
+                }
+            }
+        }
+        assert!(transitions>50,"the regression must actually test river shores");
+    }
+    #[test]
+    fn initial_river_is_active_without_expanding_the_ocean_volume() {
+        let mut t=Terrain::new();
+        assert!(t.water.active.is_empty());
+        assert!(t.water.surface_tiles.is_empty());
+        t.prime_initial_river_flow();
+        assert!(t.water.surface_tiles.len()>5);
+        assert!(t.water.surface_tiles.len()<200,
+            "a 500m river must not activate the whole 1km ocean");
+        assert!(t.water.active.is_empty(),
+            "priming a 1km river must not queue deep wet voxels");
+        let initial=t.water.surface_delta_liters;
+        let mut moved=0;
+        // A round-robin tile budget may visit calm lake tiles first.
+        // The entire initialized channel must receive one opportunity.
+        for _ in 0..100 {
+            moved+=t.step_water(4096);
+            if moved>0 {break;}
+        }
+        assert!(moved>0,"an initial downhill river must not be frozen");
+        assert_eq!(t.water.surface_delta_liters,initial);
+    }
     #[test]
     fn wrap_edges() {
         assert_eq!(wrap(-1), WORLD_SIZE - 1);
