@@ -289,7 +289,9 @@ struct ChunkGpu {
     vertices: wgpu::Buffer,
     indices: wgpu::Buffer,
     opaque_count: u32,
-    count: u32,
+    water_vertices: wgpu::Buffer,
+    water_indices: wgpu::Buffer,
+    water_count: u32,
 }
 
 struct Game {
@@ -611,22 +613,69 @@ impl Game {
         game
     }
 
+    /// Dynamic liquid occupies separate GPU buffers. A changing water level
+    /// must never force rebuilding static stone/soil faces in the same chunk.
+    fn water_buffers(&self, mesh:&mesh::Mesh)->(wgpu::Buffer,wgpu::Buffer,u32) {
+        let vertices=if mesh.vertices.is_empty() {
+            self.device.create_buffer(&wgpu::BufferDescriptor {
+                label:Some("empty chunk water vertices"),
+                size:std::mem::size_of::<mesh::Vertex>() as u64,
+                usage:wgpu::BufferUsages::VERTEX,
+                mapped_at_creation:false,
+            })
+        } else {
+            self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label:Some("chunk water vertices"),
+                contents:bytemuck::cast_slice(&mesh.vertices),
+                usage:wgpu::BufferUsages::VERTEX,
+            })
+        };
+        let indices=if mesh.indices.is_empty() {
+            self.device.create_buffer(&wgpu::BufferDescriptor {
+                label:Some("empty chunk water indices"),size:4,
+                usage:wgpu::BufferUsages::INDEX,mapped_at_creation:false,
+            })
+        } else {
+            self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label:Some("chunk water indices"),
+                contents:bytemuck::cast_slice(&mesh.indices),
+                usage:wgpu::BufferUsages::INDEX,
+            })
+        };
+        (vertices,indices,mesh.indices.len() as u32)
+    }
+
     fn gpu_chunk(&self,x:i32,y:i32) -> ChunkGpu {
-        let mesh=mesh::build(&self.terrain,x,y,0);
+        let solid=mesh::build(&self.terrain,x,y,0);
+        let water=mesh::build_water(&self.terrain,x,y,0);
+        let (water_vertices,water_indices,water_count)=self.water_buffers(&water);
         ChunkGpu {
             origin:(terrain::wrap(x),terrain::wrap(y)),
-            opaque_count:mesh.water_index_start,
-            count:mesh.indices.len() as u32,
+            opaque_count:solid.water_index_start,
             vertices:self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                label:Some("chunk vertices"),
-                contents:bytemuck::cast_slice(&mesh.vertices),
+                label:Some("chunk opaque vertices"),
+                contents:bytemuck::cast_slice(&solid.vertices),
                 usage:wgpu::BufferUsages::VERTEX,
             }),
             indices:self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                label:Some("chunk indices"),
-                contents:bytemuck::cast_slice(&mesh.indices),
+                label:Some("chunk opaque indices"),
+                contents:bytemuck::cast_slice(&solid.indices),
                 usage:wgpu::BufferUsages::INDEX,
             }),
+            water_vertices,water_indices,water_count,
+        }
+    }
+
+    /// Solid terrain edits are infrequent and may change opaque topology.
+    /// Unlike climate-driven liquid changes, those require a full rebuild.
+    fn refresh_solid_edit_chunks(&mut self,changed:&HashSet<(i32,i32,i32)>) {
+        let affected=Self::changed_chunk_origins(changed);
+        let visible:Vec<_>=self.chunks.iter().enumerate()
+            .filter(|(_,chunk)|affected.contains(&chunk.origin))
+            .map(|(i,chunk)|(i,chunk.origin)).collect();
+        for (i,(x,y)) in visible {
+            self.chunks[i]=self.gpu_chunk(x,y);
+            self.pending_mesh_chunks.remove(&(x,y));
         }
     }
 
@@ -706,7 +755,11 @@ impl Game {
             let i=(start+step)%count;
             let (x,y)=self.chunks[i].origin;
             if !self.pending_mesh_chunks.remove(&(x,y)) {continue;}
-            self.chunks[i]=self.gpu_chunk(x,y);
+            let water=mesh::build_water(&self.terrain,x,y,0);
+            let (vertices,indices,count)=self.water_buffers(&water);
+            self.chunks[i].water_vertices=vertices;
+            self.chunks[i].water_indices=indices;
+            self.chunks[i].water_count=count;
             rebuilt+=1;
             next=(i+1)%count;
         }
@@ -894,8 +947,9 @@ impl Game {
             }
             _=>return,
         }
-        changed.extend(self.terrain.take_water_dirty());
-        if !changed.is_empty() {self.queue_edited_chunks(&changed);}
+        if !changed.is_empty() {self.refresh_solid_edit_chunks(&changed);}
+        let dirty=self.terrain.take_water_dirty();
+        if !dirty.is_empty() {self.queue_edited_chunks(&dirty);}
     }
     fn render(&mut self) -> Result<(),wgpu::SurfaceError> {
         let frame = self.surface.get_current_texture()?;
@@ -933,12 +987,12 @@ impl Game {
             }
             pass.set_pipeline(&self.water_pipeline);
             for (i,chunk) in self.chunks.iter().enumerate() {
-                if chunk.opaque_count==chunk.count {continue;}
-                pass.set_vertex_buffer(0,chunk.vertices.slice(..));
+                if chunk.water_count==0 {continue;}
+                pass.set_vertex_buffer(0,chunk.water_vertices.slice(..));
                 let start=(i*8) as u64;
                 pass.set_vertex_buffer(1,self.chunk_offsets.slice(start..start+8));
-                pass.set_index_buffer(chunk.indices.slice(..),wgpu::IndexFormat::Uint32);
-                pass.draw_indexed(chunk.opaque_count..chunk.count,0,0..1);
+                pass.set_index_buffer(chunk.water_indices.slice(..),wgpu::IndexFormat::Uint32);
+                pass.draw_indexed(0..chunk.water_count,0,0..1);
             }
             pass.set_pipeline(&self.crosshair_pipeline);
             pass.set_bind_group(0,&self.camera_bind,&[]);
