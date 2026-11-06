@@ -15,6 +15,8 @@ fn neighbors((x,y,z): Cell) -> [Cell;6] {
 
 #[derive(Default)]
 pub struct WaterState {
+    // Sparse local 3D water in excavated rock. Open surface water is
+    // owned solely by surface_column_delta, never a depth stack of voxels.
     pub(crate) amounts: HashMap<Cell,u16>,
     // Spatial index for rebuilding only affected water meshes. Without
     // this, each changed chunk scans every modified water cell island-wide.
@@ -35,9 +37,6 @@ pub struct WaterState {
     // O(1) surface-column volume queries, relative to the implicit initial
     // water columns. Underground edits are excluded from these deltas.
     surface_column_delta:HashMap<(i32,i32),i64>,
-    // Rare unsupported above-ground water and constructed roofs cannot be
-    // interpreted as a single contiguous free-surface height column.
-    highest_modified_wet_z:HashMap<(i32,i32),i32>,
     pub(crate) blocked_surface_columns:HashSet<(i32,i32)>,
 }
 impl WaterState {
@@ -77,10 +76,7 @@ impl Terrain {
         let delta=self.water.surface_column_delta.get(&(x,y)).copied().unwrap_or(0);
         let liters=(baseline+delta).max(0) as u32;
         let depth=liters as f64/CAPACITY_L as f64;
-        let unsupported=self.water.highest_modified_wet_z.get(&(x,y))
-            .is_some_and(|&top|top as f64>bed as f64+depth+0.000_001);
-        let blocked=unsupported
-            || self.water.blocked_surface_columns.contains(&(x,y));
+        let blocked=self.water.blocked_surface_columns.contains(&(x,y));
         // A consistent invisible micro-relief field; its influence is
         // limited to thin runoff. Deep lake surfaces remain well-balanced.
         let mx=crate::terrain::delta(x,crate::terrain::WORLD_SIZE/2) as f64;
@@ -93,45 +89,41 @@ impl Terrain {
         SurfaceColumn {bed,liters,head_m,blocked}
     }
 
-    /// Remove a scheduled flux from the top of an open water column.
-    fn remove_surface_liters(&mut self,(x,y):(i32,i32),mut amount:u32,bed:i32) {
-        let volume=self.surface_column(x,y).liters;
-        assert!(volume>=amount && amount>0,"surface donor overdraw");
-        // The volume-derived waterline is only valid for a contiguous
-        // column. Underground drainage can leave a void under an intact
-        // upper layer. Scan from the highest *physically possible* water
-        // cell instead; a truncated waterline used to panic here at runtime.
-        let top=self.initial_water_surface(x,y).saturating_sub(1)
-            .max(self.water.highest_modified_wet_z
-                .get(&(wrap(x),wrap(y))).copied().unwrap_or(bed-1))
-            .min(WORLD_HEIGHT-1);
-        for z in (bed..=top).rev() {
-            if amount==0 {break;}
-            let current=self.water_liters(x,y,z);
-            let moved=amount.min(current as u32) as u16;
-            if moved>0 {
-                self.water_assign((x,y,z),current-moved);
-                amount-=moved as u32;
-            }
+    /// A free-surface column is the sole owner of its open-water volume.
+    /// Submerged voxel fill is a derived projection. Store sparse changes
+    /// against the finite implicit lake/ocean, not one override per meter.
+    pub(crate) fn adjust_surface_liters(&mut self,x:i32,y:i32,delta:i64) {
+        if delta==0{return;}
+        let (x,y)=(wrap(x),wrap(y));
+        let col=self.surface_column(x,y);
+        let capacity=(WORLD_HEIGHT-col.bed).max(0) as i64*CAPACITY_L as i64;
+        let after=col.liters as i64+delta;
+        assert!((0..=capacity).contains(&after),
+            "surface volume outside finite column bounds");
+        *self.water.surface_column_delta.entry((x,y)).or_default()+=delta;
+        self.water.surface_delta_liters+=delta;
+        let before_z=col.bed+((col.liters.saturating_sub(1))/CAPACITY_L as u32) as i32;
+        let after_z=col.bed+(((after as u32).saturating_sub(1))/CAPACITY_L as u32) as i32;
+        let chunk=(x.div_euclid(crate::terrain::CHUNK_SIZE)*crate::terrain::CHUNK_SIZE,
+            y.div_euclid(crate::terrain::CHUNK_SIZE)*crate::terrain::CHUNK_SIZE);
+        for z in [before_z,after_z,col.bed] {
+            let at=(x,y,z);
+            self.water.dirty.insert(at);
+            self.water.changed_by_chunk.entry(chunk).or_default().insert(at);
         }
-        assert_eq!(amount,0,"surface flux donor lacked water");
+        self.water.activate_surface((x,y));
+        self.soil.activate((x,y));
     }
-    /// Store a scheduled flux in the lowest available cells above the bed.
-    fn add_surface_liters(&mut self,(x,y):(i32,i32),mut amount:u32,bed:i32) {
-        // Always fill the lowest open cell first. A cavity may have left
-        // holes below the volume-derived surface; starting at the assumed
-        // waterline would preserve those holes indefinitely.
-        for z in bed..WORLD_HEIGHT {
-            if amount==0 {break;}
-            if self.block(x,y,z).solid() {continue;}
-            let current=self.water_liters(x,y,z);
-            let moved=amount.min((CAPACITY_L-current) as u32) as u16;
-            if moved>0 {
-                self.water_assign((x,y,z),current+moved);
-                amount-=moved as u32;
-            }
-        }
-        assert_eq!(amount,0,"surface flux receiver lacked capacity");
+
+    fn remove_surface_liters(&mut self,(x,y):(i32,i32),amount:u32,_bed:i32) {
+        assert!(amount>0 && self.surface_column(x,y).liters>=amount,
+            "surface donor overdraw");
+        self.adjust_surface_liters(x,y,-(amount as i64));
+    }
+
+    fn add_surface_liters(&mut self,(x,y):(i32,i32),amount:u32,_bed:i32) {
+        assert!(amount>0);
+        self.adjust_surface_liters(x,y,amount as i64);
     }
 
     /// Schedule conservative edge transfers from the same snapshot. All
@@ -197,71 +189,44 @@ impl Terrain {
         fluxes.len()
     }
 
-    pub fn water_liters(&self, x:i32,y:i32,z:i32) -> u16 {
+    /// Compatibility view: a fluid column fills from the bottom upwards.
+    /// In open water no floating voxel can exist independently from its
+    /// column's conserved inventory. Excavated solid voxels use sparse 3D.
+    pub fn water_liters(&self,x:i32,y:i32,z:i32)->u16 {
         if !(0..WORLD_HEIGHT).contains(&z) {return 0;}
         let cell=(wrap(x),wrap(y),z);
-        if let Some(b)=self.edits.get(&cell) {
-            if b.solid() {return 0;}
+        if self.edits.get(&cell).is_some_and(|b|b.solid()){return 0;}
+        let bed=self.height(cell.0,cell.1)+1;
+        if z>=bed {
+            let col=self.surface_column(cell.0,cell.1);
+            let below=(z-bed) as i64*CAPACITY_L as i64;
+            return (col.liters as i64-below).clamp(0,CAPACITY_L as i64) as u16;
         }
-        if let Some(&volume)=self.water.amounts.get(&cell) {return volume;}
-        // New empty cells created by mining are empty until water moves in.
-        if self.edits.contains_key(&cell) {return 0;}
-        if z > self.height(cell.0,cell.1)
-            && z<self.initial_water_surface(cell.0,cell.1) {
-            CAPACITY_L
-        } else {0}
+        self.water.amounts.get(&cell).copied().unwrap_or(0)
     }
-    pub(crate) fn water_assign(&mut self, cell:Cell, amount:u16) {
+    pub(crate) fn water_assign(&mut self,cell:Cell,amount:u16) {
         let cell=canonical(cell);
         let old=self.water_liters(cell.0,cell.1,cell.2);
         let new_amount=amount.min(CAPACITY_L);
         let change=new_amount as i64-old as i64;
-        if change==0 {return;}
-        self.water.surface_delta_liters+=change;
-        let ground=self.height(cell.0,cell.1);
-        if cell.2>ground {
-            *self.water.surface_column_delta.entry((cell.0,cell.1)).or_default()+=change;
-            if new_amount>0 {
-                self.water.highest_modified_wet_z.entry((cell.0,cell.1))
-                    .and_modify(|top|*top=(*top).max(cell.2))
-                    .or_insert(cell.2);
-            } else if self.water.highest_modified_wet_z.get(&(cell.0,cell.1))==Some(&cell.2) {
-                // The old path scanned every changed water cell on the
-                // entire island for every drained top cell. A single 1m²
-                // column has at most WORLD_HEIGHT cells; bound this lookup
-                // to the local vertical column instead.
-                let bed=self.height(cell.0,cell.1)+1;
-                let top=(bed..cell.2).rev().find(|&z|
-                    self.water.amounts.get(&(cell.0,cell.1,z))
-                        .is_some_and(|&liters|liters>0));
-                if let Some(z)=top {
-                    self.water.highest_modified_wet_z.insert((cell.0,cell.1),z);
-                } else {self.water.highest_modified_wet_z.remove(&(cell.0,cell.1));}
-            }
+        if change==0{return;}
+        if cell.2>self.height(cell.0,cell.1) {
+            // The target Z is not a separate bucket; it identifies the
+            // amount being debited/credited to the owning open column.
+            self.adjust_surface_liters(cell.0,cell.1,change);
+            return;
         }
+        self.water.surface_delta_liters+=change;
         self.water.amounts.insert(cell,new_amount);
+        self.water.dirty.insert(cell);
         let chunk=(cell.0.div_euclid(crate::terrain::CHUNK_SIZE)*crate::terrain::CHUNK_SIZE,
             cell.1.div_euclid(crate::terrain::CHUNK_SIZE)*crate::terrain::CHUNK_SIZE);
         self.water.changed_by_chunk.entry(chunk).or_default().insert(cell);
-        self.water.dirty.insert(cell);
-        if cell.2>ground {
-            // Open water flow is 2D. Do not activate every submerged 3D
-            // neighbor on each tiny water transfer.
-            self.water.activate_surface((cell.0,cell.1));
-            // Exception: a water cell hanging over a mined/open cavity
-            // still needs the local 3D falling-water adapter.
-            if cell.2>0 && self.water_liters(cell.0,cell.1,cell.2-1)==0
-                && !self.block(cell.0,cell.1,cell.2-1).solid() {
-                self.water.active.insert(cell);
-            }
-        } else {
-            // Underground edits still need local six-direction connectivity.
-            for nearby in std::iter::once(cell).chain(neighbors(cell)) {
-                let nearby=canonical(nearby);
-                if (0..WORLD_HEIGHT).contains(&nearby.2)
-                    && self.water_liters(nearby.0,nearby.1,nearby.2)>0 {
-                    self.water.active.insert(nearby);
-                }
+        for nearby in std::iter::once(cell).chain(neighbors(cell)) {
+            let nearby=canonical(nearby);
+            if (0..WORLD_HEIGHT).contains(&nearby.2)
+                && self.water_liters(nearby.0,nearby.1,nearby.2)>0 {
+                self.water.active.insert(nearby);
             }
         }
         self.soil.activate((cell.0,cell.1));
