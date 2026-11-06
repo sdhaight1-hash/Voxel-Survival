@@ -105,34 +105,68 @@ fn build_internal(t:&Terrain,center_x:i32,center_y:i32,radius:i32,water_only:boo
             let base_y = origin_y + cy * CHUNK_SIZE;
             // 34x34 heights include the neighbor border; no noise calls in the voxel loop.
             let mut heights = [[0i32; 34]; 34];
+            let mut surfaces = [[0i32; 34]; 34];
             let mut max_height = SEA_LEVEL;
             for ly in -1..=32 {
                 for lx in -1..=32 {
                     let h = t.height(base_x + lx, base_y + ly);
                     heights[(ly + 1) as usize][(lx + 1) as usize] = h;
-                    // Elevated lakes can sit many meters above their bed.
-                    // Mesh the actual initial water surface, not only terrain.
-                    max_height = max_height.max(h)
-                        .max(t.initial_water_surface(base_x+lx,base_y+ly));
+                    let surface=t.initial_water_surface(base_x+lx,base_y+ly);
+                    surfaces[(ly + 1) as usize][(lx + 1) as usize]=surface;
+                    max_height=max_height.max(h).max(surface);
                 }
             }
-            // Keep edited underground tunnels visible without scanning the solid core.
+            // Per-column water-only work bounds. Calm ocean columns need
+            // just their top layer, not every voxel down to the seabed.
+            // When a cell is modified, include its height and neighboring
+            // levels so gapped water columns and cave faces are not lost.
+            let mut changed_low=[[WORLD_HEIGHT;34];34];
+            let mut changed_high=[[-1i32;34];34];
+            let mut explicitly_wet=[[false;34];34];
+            // Keep edited underground tunnels visible in full opaque meshes.
             let mut minimum_edit_z = WORLD_HEIGHT;
             // Include player-placed blocks above the original terrain surface.
-            for (&(ex, ey, ez), _) in &t.edits {
-                if (0..CHUNK_SIZE).contains(&delta(ex, base_x))
-                    && (0..CHUNK_SIZE).contains(&delta(ey, base_y)) {
-                    max_height = max_height.max(ez);
-                    minimum_edit_z = minimum_edit_z.min(ez);
+            for (&(ex,ey,ez),_) in &t.edits {
+                let lx=delta(ex,base_x);
+                let ly=delta(ey,base_y);
+                if (-1..=CHUNK_SIZE).contains(&lx)
+                    && (-1..=CHUNK_SIZE).contains(&ly) {
+                    changed_low[(ly+1) as usize][(lx+1) as usize]=
+                        changed_low[(ly+1) as usize][(lx+1) as usize].min(ez-1);
+                    if (0..CHUNK_SIZE).contains(&lx)
+                        && (0..CHUNK_SIZE).contains(&ly) {
+                        max_height=max_height.max(ez);
+                        minimum_edit_z=minimum_edit_z.min(ez);
+                    }
                 }
             }
-            let changed_chunk=(wrap(base_x),wrap(base_y));
-            if let Some(changed)=t.water.changed_by_chunk.get(&changed_chunk) {
-                // Water modifications are indexed spatially; don't scan
-                // every modified cell on the island for each chunk mesh.
-                for &(_,_,ez) in changed {
-                    max_height=max_height.max(ez);
-                    minimum_edit_z=minimum_edit_z.min(ez);
+            // Include the 1-cell border for exposed water side faces.
+            // The other eight neighbor-chunk indexes are only needed when
+            // modifications fall directly on a chunk boundary.
+            for cy in -1..=1 {
+                for cx in -1..=1 {
+                    let key=(wrap(base_x+cx*CHUNK_SIZE),
+                        wrap(base_y+cy*CHUNK_SIZE));
+                    if let Some(changed)=t.water.changed_by_chunk.get(&key) {
+                        for &(ex,ey,ez) in changed {
+                            let lx=delta(ex,base_x);
+                            let ly=delta(ey,base_y);
+                            if !(-1..=CHUNK_SIZE).contains(&lx)
+                                || !(-1..=CHUNK_SIZE).contains(&ly) {continue;}
+                            let iy=(ly+1) as usize;
+                            let ix=(lx+1) as usize;
+                            changed_low[iy][ix]=changed_low[iy][ix].min(ez-1);
+                            changed_high[iy][ix]=changed_high[iy][ix].max(ez);
+                            if t.water_liters(ex,ey,ez)>0 {
+                                explicitly_wet[iy][ix]=true;
+                            }
+                            if (0..CHUNK_SIZE).contains(&lx)
+                                && (0..CHUNK_SIZE).contains(&ly) {
+                                max_height=max_height.max(ez);
+                                minimum_edit_z=minimum_edit_z.min(ez);
+                            }
+                        }
+                    }
                 }
             }
             for ly in 0..32 {
@@ -147,12 +181,37 @@ fn build_internal(t:&Terrain,center_x:i32,center_y:i32,radius:i32,water_only:boo
                         .min(heights[(ly + 2) as usize][(lx + 1) as usize])
                         .min(heights[(ly + 1) as usize][lx as usize])
                         .min(heights[(ly + 1) as usize][(lx + 2) as usize]);
-                    let start_z = (lowest_neighbor - 5).min(minimum_edit_z - 1).max(0);
-                    for z in start_z..=(max_height + 1).min(WORLD_HEIGHT - 1) {
-                        let b = block(t, x, y, z, h);
-                        if b == Block::Air || (water_only && b!=Block::Water) {
+                    let (start_z,end_z)=if water_only {
+                        let iy=(ly+1) as usize;
+                        let ix=(lx+1) as usize;
+                        let upper=(surfaces[iy][ix]-1)
+                            .max(changed_high[iy][ix]);
+                        // No initial water and no modified wet cells.
+                        if surfaces[iy][ix]<=h+1 && !explicitly_wet[iy][ix] {
                             continue;
                         }
+                        let mut low=surfaces[iy][ix]-1;
+                        for (oy,ox) in [(0isize,0isize),(-1,0),(1,0),(0,-1),(0,1)] {
+                            let ny=(iy as isize+oy) as usize;
+                            let nx=(ix as isize+ox) as usize;
+                            low=low.min(surfaces[ny][nx]-1)
+                                .min(changed_low[ny][nx]);
+                        }
+                        (low.max(0),upper.min(WORLD_HEIGHT-1))
+                    } else {
+                        ((lowest_neighbor-5).min(minimum_edit_z-1).max(0),
+                            (max_height+1).min(WORLD_HEIGHT-1))
+                    };
+                    if start_z>end_z {continue;}
+                    for z in start_z..=end_z {
+                        let b=if water_only {
+                            if t.water_liters(x,y,z)==0 {continue;}
+                            Block::Water
+                        } else {
+                            let b=block(t,x,y,z,h);
+                            if b==Block::Air {continue;}
+                            b
+                        };
                         for (face, &(dx,dy,dz)) in DIRECTIONS.iter().enumerate() {
                             let nh = heights[(ly + dy + 1) as usize][(lx + dx + 1) as usize];
                             let neighbor = block(t, x + dx, y + dy, z + dz, nh);
@@ -225,6 +284,39 @@ mod water_mesh_tests {
         let liquid_faces:Vec<_>=liquid.indices.iter()
             .map(|&i|liquid.vertices[i as usize].pos).collect();
         assert_eq!(full_faces,liquid_faces);
+    }
+    #[test]
+    fn optimized_water_scan_preserves_full_water_faces_at_shores_and_caves() {
+        fn parity(t:&Terrain,x:i32,y:i32) {
+            let whole=build(t,x,y,0);
+            let liquid=build_water(t,x,y,0);
+            let first:Vec<_>=whole.indices[whole.water_index_start as usize..]
+                .iter().map(|&i|whole.vertices[i as usize].pos).collect();
+            let second:Vec<_>=liquid.indices.iter()
+                .map(|&i|liquid.vertices[i as usize].pos).collect();
+            assert_eq!(first,second,"water-only mesh changed actual geometry");
+        }
+        let mut t=Terrain::new();
+        let m=WORLD_SIZE/2;
+        // Untouched water, river bank and the island's periodic ocean seam.
+        parity(&t,0,0);
+        parity(&t,m-115+78,m+125);
+        // Artificial partial waterfall and a lower gap in an elevated lake.
+        let lake=(m-115,m+125);
+        let bed=t.height(lake.0,lake.1)+1;
+        t.water_assign((lake.0,lake.1,bed),0);
+        t.water_assign((lake.0+1,lake.1,125),420);
+        parity(&t,lake.0,lake.1);
+        // Roofed cave water and a separate, high unsupported cell.
+        let rock=(m,m,t.height(m,m)-3);
+        t.set(rock.0,rock.1,rock.2,Block::Air);
+        t.water_assign(rock,675);
+        t.water_assign((m,m,238),620);
+        parity(&t,m,m);
+        // The neighbor chunk must show the changed edge correctly.
+        t.water_assign((31,0,109),700);
+        parity(&t,0,0);
+        parity(&t,32,0);
     }
     #[test]
     fn water_mesh_uses_authoritative_liquid_inventory_after_depletion() {
