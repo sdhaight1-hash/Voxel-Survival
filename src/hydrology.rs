@@ -82,9 +82,15 @@ impl Terrain {
     fn remove_surface_liters(&mut self,(x,y):(i32,i32),mut amount:u32,bed:i32) {
         let volume=self.surface_column(x,y).liters;
         assert!(volume>=amount && amount>0,"surface donor overdraw");
-        let top=bed+((volume-1)/CAPACITY_L as u32) as i32;
-        // Never scan 100+ meters of empty air above a shallow water film.
-        for z in (bed..=top.min(WORLD_HEIGHT-1)).rev() {
+        // The volume-derived waterline is only valid for a contiguous
+        // column. Underground drainage can leave a void under an intact
+        // upper layer. Scan from the highest *physically possible* water
+        // cell instead; a truncated waterline used to panic here at runtime.
+        let top=self.initial_water_surface(x,y).saturating_sub(1)
+            .max(self.water.highest_modified_wet_z
+                .get(&(wrap(x),wrap(y))).copied().unwrap_or(bed-1))
+            .min(WORLD_HEIGHT-1);
+        for z in (bed..=top).rev() {
             if amount==0 {break;}
             let current=self.water_liters(x,y,z);
             let moved=amount.min(current as u32) as u16;
@@ -97,10 +103,10 @@ impl Terrain {
     }
     /// Store a scheduled flux in the lowest available cells above the bed.
     fn add_surface_liters(&mut self,(x,y):(i32,i32),mut amount:u32,bed:i32) {
-        let volume=self.surface_column(x,y).liters;
-        let start=bed+(volume/CAPACITY_L as u32) as i32;
-        // Start at the current free surface, not the basin floor.
-        for z in start..WORLD_HEIGHT {
+        // Always fill the lowest open cell first. A cavity may have left
+        // holes below the volume-derived surface; starting at the assumed
+        // waterline would preserve those holes indefinitely.
+        for z in bed..WORLD_HEIGHT {
             if amount==0 {break;}
             if self.block(x,y,z).solid() {continue;}
             let current=self.water_liters(x,y,z);
@@ -192,6 +198,7 @@ impl Terrain {
         let old=self.water_liters(cell.0,cell.1,cell.2);
         let new_amount=amount.min(CAPACITY_L);
         let change=new_amount as i64-old as i64;
+        if change==0 {return;}
         self.water.surface_delta_liters+=change;
         if cell.2>self.height(cell.0,cell.1) {
             *self.water.surface_column_delta.entry((cell.0,cell.1)).or_default()+=change;
@@ -200,9 +207,14 @@ impl Terrain {
                     .and_modify(|top|*top=(*top).max(cell.2))
                     .or_insert(cell.2);
             } else if self.water.highest_modified_wet_z.get(&(cell.0,cell.1))==Some(&cell.2) {
-                let top=self.water.amounts.iter().filter_map(|(&(x,y,z),&liters)|
-                    (x==cell.0 && y==cell.1 && z!=cell.2 && liters>0).then_some(z))
-                    .max();
+                // The old path scanned every changed water cell on the
+                // entire island for every drained top cell. A single 1m²
+                // column has at most WORLD_HEIGHT cells; bound this lookup
+                // to the local vertical column instead.
+                let bed=self.height(cell.0,cell.1)+1;
+                let top=(bed..cell.2).rev().find(|&z|
+                    self.water.amounts.get(&(cell.0,cell.1,z))
+                        .is_some_and(|&liters|liters>0));
                 if let Some(z)=top {
                     self.water.highest_modified_wet_z.insert((cell.0,cell.1),z);
                 } else {self.water.highest_modified_wet_z.remove(&(cell.0,cell.1));}
@@ -406,8 +418,11 @@ impl Terrain {
                 self.water.active.insert(cell);
                 continue;
             }
-            processed.push(cell);
             if self.water_liters(cell.0,cell.1,cell.2)==0 {continue;}
+            // Only wet cells can drive hydraulic gradients or conduits.
+            // Previously thousands of dry/solid neighbors entered the
+            // expensive surface-column sort on every 0.2s tick.
+            processed.push(cell);
             // Gravity in cavities and unsupported cells stays on the local
             // voxel adapter until the conduit/pressure phase is integrated.
             if self.transfer(cell,(cell.0,cell.1,cell.2-1),500)>0 {
@@ -707,6 +722,43 @@ mod tests {
         assert_eq!(disturbed.water.surface_delta_liters,mass);
         eprintln!("hydrology bench: calm={:.3} ms/tick active={:.3} ms/tick transfers={} dirty_cells={}",
             calm_ms,active_ms,transfers,dirty);
+    }
+    #[test]
+    fn gapped_column_donor_moves_real_water_not_derived_waterline() {
+        let mut t=Terrain::new();
+        let (x,y)=(WORLD_SIZE/2-115,WORLD_SIZE/2+125);
+        let bed=t.height(x,y)+1;
+        assert!(t.initial_water_surface(x,y)>bed+1);
+        // A mined drainage path can empty a lower layer while upper
+        // implicit lake water is still present. Aggregate volume alone
+        // does not tell us where those real liters reside.
+        t.water_assign((x,y,bed),0);
+        let upper=t.initial_water_surface(x,y)-1;
+        assert_eq!(t.water_liters(x,y,upper),CAPACITY_L);
+        let before=t.water.surface_delta_liters;
+        t.remove_surface_liters((x,y),45,bed);
+        assert_eq!(t.water_liters(x,y,upper),CAPACITY_L-45);
+        assert_eq!(t.water.surface_delta_liters,before-45);
+    }
+    #[test]
+    fn gapped_column_receiver_fills_lowest_real_open_cell() {
+        let mut t=Terrain::new();
+        let (x,y)=(WORLD_SIZE/2-115,WORLD_SIZE/2+125);
+        let bed=t.height(x,y)+1;
+        t.water_assign((x,y,bed),0);
+        let before=t.water.surface_delta_liters;
+        t.add_surface_liters((x,y),45,bed);
+        assert_eq!(t.water_liters(x,y,bed),45);
+        assert_eq!(t.water.surface_delta_liters,before+45);
+    }
+    #[test]
+    fn dry_active_neighbors_are_not_hydraulic_sources() {
+        let mut t=Terrain::new();
+        let x=WORLD_SIZE/2;let y=WORLD_SIZE/2;
+        t.water.activate((x,y,230));
+        assert_eq!(t.step_water(4096),0);
+        assert_eq!(t.water.surface_delta_liters,0);
+        assert!(t.water.amounts.is_empty());
     }
     #[test]
     fn water_transfers_conserve_local_mass_and_wrap() {
