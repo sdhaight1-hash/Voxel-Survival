@@ -238,10 +238,11 @@ mod tests {
     fn initial_river_is_active_without_expanding_the_ocean_volume() {
         let mut t=Terrain::new();
         assert!(t.water.active.is_empty());
-        assert!(t.water.surface_active.is_empty());
+        assert!(t.water.surface_tiles.is_empty());
         t.prime_initial_river_flow();
-        assert!(t.water.surface_active.len()>1000);
-        assert!(t.water.surface_active.len()<20000);
+        assert!(t.water.surface_tiles.len()>5);
+        assert!(t.water.surface_tiles.len()<200,
+            "a 500m river must not activate the whole 1km ocean");
         assert!(t.water.active.is_empty(),
             "priming a 1km river must not queue deep wet voxels");
         let initial=t.water.surface_delta_liters;
