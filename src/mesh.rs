@@ -350,129 +350,76 @@ mod water_mesh_tests {
     use crate::terrain::WORLD_SIZE;
 
     #[test]
-    fn dynamic_water_only_mesh_matches_full_chunk_water_faces() {
+    fn deep_ocean_is_one_surface_quad_per_column_not_a_voxel_stack() {
+        let t=Terrain::new();
+        assert_eq!(t.open_water_elevation(0,0),Some(110.0));
+        let m=build_water(&t,0,0,0);
+        assert_eq!(m.water_index_start,0);
+        assert_eq!(m.vertices.len(),32*32*4);
+        assert_eq!(m.indices.len(),32*32*6);
+        assert!(m.vertices.iter().all(|v|(v.pos[2]-110.0).abs()<0.0001),
+            "calm deep water must have no stacked or floating panels");
+    }
+    #[test]
+    fn ocean_water_does_not_refill_after_a_column_is_depleted() {
+        let mut t=Terrain::new();
+        let x=0;let y=0;
+        assert_eq!(t.open_water_elevation(x,y),Some(110.0));
+        t.water_assign((x,y,109),0);
+        assert_eq!(t.open_water_elevation(x,y),Some(109.0));
+        assert_eq!(t.water_liters(x,y,109),0);
+        let m=build_water(&t,x,y,0);
+        assert!(m.vertices.iter().any(|v|(v.pos[2]-109.0).abs()<0.0001));
+    }
+    #[test]
+    fn elevated_lake_surface_follows_conserved_column_volume() {
         let mut t=Terrain::new();
         let (x,y)=(WORLD_SIZE/2-115,WORLD_SIZE/2+125);
+        assert_eq!(t.open_water_elevation(x,y),Some(126.0));
         let bed=t.height(x,y)+1;
-        t.water_assign((x,y,bed),750);
-        let whole=build(&t,x,y,0);
-        let liquid=build_water(&t,x,y,0);
-        assert_eq!(liquid.water_index_start,0);
-        assert_eq!(whole.indices.len()-whole.water_index_start as usize,
-            liquid.indices.len());
-        let full_faces:Vec<_>=whole.indices[whole.water_index_start as usize..]
-            .iter().map(|&i|whole.vertices[i as usize].pos).collect();
-        let liquid_faces:Vec<_>=liquid.indices.iter()
-            .map(|&i|liquid.vertices[i as usize].pos).collect();
-        assert_eq!(full_faces,liquid_faces);
-    }
-    #[test]
-    fn optimized_water_scan_preserves_full_water_faces_at_shores_and_caves() {
-        fn parity(t:&Terrain,x:i32,y:i32) {
-            let whole=build(t,x,y,0);
-            let liquid=build_water(t,x,y,0);
-            let first:Vec<_>=whole.indices[whole.water_index_start as usize..]
-                .iter().map(|&i|whole.vertices[i as usize].pos).collect();
-            let second:Vec<_>=liquid.indices.iter()
-                .map(|&i|liquid.vertices[i as usize].pos).collect();
-            assert_eq!(first,second,"water-only mesh changed actual geometry");
-        }
-        let mut t=Terrain::new();
-        let m=WORLD_SIZE/2;
-        // Untouched water, river bank and the island's periodic ocean seam.
-        parity(&t,0,0);
-        parity(&t,m-115+78,m+125);
-        // Artificial partial waterfall and a lower gap in an elevated lake.
-        let lake=(m-115,m+125);
-        let bed=t.height(lake.0,lake.1)+1;
-        t.water_assign((lake.0,lake.1,bed),0);
-        t.water_assign((lake.0+1,lake.1,125),420);
-        parity(&t,lake.0,lake.1);
-        // Roofed cave water and a separate, high unsupported cell.
-        let rock=(m,m,t.height(m,m)-3);
-        t.set(rock.0,rock.1,rock.2,Block::Air);
-        t.water_assign(rock,675);
-        t.water_assign((m,m,238),620);
-        parity(&t,m,m);
-        // The neighbor chunk must show the changed edge correctly.
-        t.water_assign((31,0,109),700);
-        parity(&t,0,0);
-        parity(&t,32,0);
-    }
-    #[test]
-    fn water_mesh_uses_authoritative_liquid_inventory_after_depletion() {
-        let mut t=Terrain::new();
-        let (x,y)=(WORLD_SIZE/2-115,WORLD_SIZE/2+125);
-        assert_eq!(block(&t,x,y,125,t.height(x,y)),Block::Water);
+        assert!(bed<125);
         t.water_assign((x,y,125),0);
-        assert_eq!(block(&t,x,y,125,t.height(x,y)),Block::Air);
-        assert_eq!(t.water_liters(x,y,125),0);
+        assert_eq!(t.open_water_elevation(x,y),Some(125.0));
+        let m=build_water(&t,x,y,0);
+        assert!(m.vertices.iter().any(|v|(v.pos[2]-125.0).abs()<0.0001));
     }
     #[test]
-    fn sparse_water_edits_remain_in_chunk_mesh_after_indexing() {
+    fn rainfall_creates_a_real_surface_at_ground_not_floating_at_requested_z() {
         let mut t=Terrain::new();
         let x=WORLD_SIZE/2;let y=WORLD_SIZE/2;
-        t.water_assign((x,y,240),700);
-        t.water_assign((x+32,y,246),200);
-        let m=build(&t,x,y,0);
-        assert!(m.indices.len()>m.water_index_start as usize);
-        assert!(m.indices[m.water_index_start as usize..].iter()
-            .any(|&i| m.vertices[i as usize].pos[2]>=240.6));
-        assert!(m.vertices.iter().all(|v|v.pos[2]<246.0),
-            "off-chunk water edits must not bleed into local mesh");
+        let bed=t.height(x,y)+1;
+        t.water.atmosphere_liters=700;
+        assert_eq!(t.precipitate((x,y,240),700),700);
+        assert_eq!(t.water_liters(x,y,240),0);
+        assert_eq!(t.water_liters(x,y,bed),700);
+        let m=build_water(&t,x,y,0);
+        assert!(m.vertices.iter().any(|v|
+            (v.pos[2]-(bed as f32+0.7)).abs()<0.0001));
     }
     #[test]
-    fn elevated_lake_mesh_reaches_absolute_initial_water_surface() {
-        let t=Terrain::new();
-        let (x,y)=(WORLD_SIZE/2-115,WORLD_SIZE/2+125);
-        assert_eq!(t.initial_water_surface(x,y),126);
-        assert!(t.height(x,y)<125);
-        let m=build(&t,x,y,0);
-        let water_vertices=m.indices[m.water_index_start as usize..].iter()
-            .map(|&index|m.vertices[index as usize].pos);
-        assert!(water_vertices.into_iter().any(|p|(p[2]-126.0).abs()<1e-5),
-            "the elevated lake must render its free surface at Z=126");
-    }
-    #[test]
-    fn partial_water_neighbors_emit_only_height_difference_not_full_panels() {
+    fn isolated_cave_water_still_has_sparse_three_dimensional_faces() {
         let mut t=Terrain::new();
-        let x=WORLD_SIZE/2;
-        let y=WORLD_SIZE/2;
-        t.water.atmosphere_liters=1200;
-        assert_eq!(t.precipitate((x,y,240),800),800);
-        assert_eq!(t.precipitate((x+1,y,240),400),400);
-        let m=build(&t,x,y,0);
-        let start=m.water_index_start as usize;
-        let mut found=false;
-        for tri in m.indices[start..].chunks_exact(3) {
-            let a=m.vertices[tri[0] as usize].pos;
-            let b=m.vertices[tri[1] as usize].pos;
-            let c=m.vertices[tri[2] as usize].pos;
-            // The east-facing side of the 800L cell lies at local X=1,
-            // Y 0..1 and Z 240.4..240.8.
-            if [a,b,c].iter().all(|v|(v[0]-1.0).abs()<1e-5)
-                && [a,b,c].iter().all(|v|v[1]>=0.0 && v[1]<=1.0)
-                && [a,b,c].iter().all(|v|v[2]>=240.3999 && v[2]<=240.8001)
-                && [a,b,c].iter().any(|v|(v[2]-240.4).abs()<1e-4)
-                && [a,b,c].iter().any(|v|(v[2]-240.8).abs()<1e-4) {
-                found=true;
-            }
-        }
-        assert!(found,"missing exposed height-difference side");
+        let x=WORLD_SIZE/2;let y=WORLD_SIZE/2;
+        let z=t.height(x,y)-2;
+        t.set(x,y,z,Block::Air);
+        t.water_assign((x,y,z),650);
+        let m=build_water(&t,x,y,0);
+        assert!(!m.indices.is_empty(),"excavated water must remain visible");
+        assert!(m.vertices.iter().all(|v|v.pos[2]<t.height(x,y) as f32));
     }
-
     #[test]
-    fn placing_over_water_does_not_remove_exposed_neighbor_water() {
+    fn a_neighboring_chunk_does_not_duplicate_edited_water_surface() {
         let mut t=Terrain::new();
-        let x=WORLD_SIZE/2;
-        let y=WORLD_SIZE/2;
-        t.water.atmosphere_liters=800;
-        assert_eq!(t.precipitate((x,y,240),800),800);
-        // Solid directly above should occlude only that top, not the
-        // east side bordering empty air.
-        t.set(x,y,241,Block::Stone);
-        let m=build(&t,x,y,0);
-        assert!(m.indices.len()>m.water_index_start as usize);
-        assert_eq!(t.water_liters(x,y,240),800);
+        let x=WORLD_SIZE/2;let y=WORLD_SIZE/2;
+        let bed=t.height(x,y)+1;
+        t.water_assign((x,y,bed),800);
+        t.water_assign((x+32,y,t.height(x+32,y)+1),200);
+        let m=build_water(&t,x,y,0);
+        let local_x=delta(x,x.div_euclid(CHUNK_SIZE)*CHUNK_SIZE) as f32;
+        let local_y=delta(y,y.div_euclid(CHUNK_SIZE)*CHUNK_SIZE) as f32;
+        assert!(m.vertices.iter().any(|v|
+            (v.pos[0]-local_x).abs()<0.01
+            &&(v.pos[1]-local_y).abs()<0.01
+            &&(v.pos[2]-(bed as f32+0.8)).abs()<0.0001));
     }
 }
