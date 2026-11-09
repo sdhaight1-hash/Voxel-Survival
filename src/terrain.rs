@@ -7,7 +7,7 @@ pub const WORLD_HEIGHT: i32 = 256;
 pub const CHUNK_SIZE: i32 = 32;
 pub const SEA_LEVEL: i32 = 110;
 
-#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+#[derive(Copy, Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[repr(u8)]
 pub enum Block {
     Air = 0,
@@ -15,10 +15,15 @@ pub enum Block {
     Grass = 2,
     Stone = 3,
     Water = 4,
+    Wood = 5,
+    Leaves = 6,
+    Planks = 7,
+    Campfire = 8,
+    CopperOre = 9,
 }
 impl Block {
     pub fn solid(self) -> bool {
-        matches!(self, Self::Dirt | Self::Grass | Self::Stone)
+        !matches!(self, Self::Air | Self::Water)
     }
 }
 
@@ -62,10 +67,31 @@ impl Terrain {
         if self.water_liters(x,y,z)>0 {return Block::Water;}
         if self.edits.contains_key(&cell) {return Block::Air;}
         let h=self.height(x,y);
-        if z>h {Block::Air}
-        else if z==h {if h<SEA_LEVEL {Block::Dirt} else {Block::Grass}}
-        else if z>=h-3 {Block::Dirt}
-        else {Block::Stone}
+        self.natural_block(x,y,z,h)
+
+    }
+    /// Cheap periodic tree patches and ore deposits for the first survival loop.
+    /// These are provisional generation rules, not the planned ecology/geology model.
+    pub fn natural_block(&self, x:i32, y:i32, z:i32, h:i32) -> Block {
+        let x=wrap(x); let y=wrap(y);
+        if z>h {
+            if h>SEA_LEVEL+2 && h<240 {
+                let tx=x/16; let ty=y/16;
+                let hash=(tx as u32).wrapping_mul(73856093) ^ (ty as u32).wrapping_mul(19349663);
+                let dx=x%16-8; let dy=y%16-8;
+                if hash%3==0 {
+                    if dx==0 && dy==0 && z<=h+4 {return Block::Wood;}
+                    if dx.abs()<=2 && dy.abs()<=2 && (h+4..=h+6).contains(&z) {
+                        return Block::Leaves;
+                    }
+                }
+            }
+            return Block::Air;
+        }
+        if z==h {return if h<SEA_LEVEL {Block::Dirt} else {Block::Grass};}
+        if z>=h-3 {return Block::Dirt;}
+        let vein=(x/5).wrapping_mul(73) ^ (y/5).wrapping_mul(151) ^ (z/4).wrapping_mul(199);
+        if vein.rem_euclid(29)==0 {Block::CopperOre} else {Block::Stone}
     }
     pub fn set(&mut self, x:i32, y:i32, z:i32, block:Block) {
         // Liquid is moved only through the finite-volume hydrology API.

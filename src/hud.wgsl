@@ -28,6 +28,11 @@ fn fs_hud(@builtin(position) frag:vec4<f32>) -> @location(0) vec4<f32> {
     if x>=right_left && x<right_left+320.0 && y>=12.0 && y<104.0 {
         atlas_x=416.0+x-right_left;
     }
+    let bottom_left=max(0.0,(camera.viewport.x-736.0)*0.5);
+    let bottom_top=camera.viewport.y-252.0;
+    if x>=bottom_left && x<bottom_left+736.0 && y>=bottom_top && y<bottom_top+240.0 {
+        return textureLoad(hud_atlas,vec2<i32>(i32(x-bottom_left),i32(y-bottom_top+100.0)),0);
+    }
     if atlas_x<0.0 {discard;}
     let color=textureLoad(hud_atlas,vec2<i32>(i32(atlas_x),i32(y-12.0)),0);
     if color.a<0.01 {discard;}

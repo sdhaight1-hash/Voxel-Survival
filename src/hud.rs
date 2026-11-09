@@ -5,7 +5,7 @@ use std::f64::consts::{PI, TAU};
 use crate::terrain::WORLD_SIZE;
 
 pub const WIDTH: u32 = 768;
-pub const HEIGHT: u32 = 92;
+pub const HEIGHT: u32 = 340;
 const COMPASS_W: i32 = 416;
 const INFO_X: i32 = 416;
 const PANEL_BG: [u8;4] = [8,18,24,178];
@@ -61,7 +61,7 @@ fn centered_text(out:&mut [u8],center:i32,y:i32,msg:&str,color:[u8;4],scale:i32)
     text(out,center-msg.len() as i32*4*scale,y,msg,color,scale);
 }
 fn compass(out:&mut [u8],heading:f64) {
-    fill(out,0,0,COMPASS_W,HEIGHT as i32,PANEL_BG);
+    fill(out,0,0,COMPASS_W,92,PANEL_BG);
     // Scroll compass ticks under the fixed center indicator.
     let heading = (heading.round() as i32).rem_euclid(360) as f64;
     for offset in -13..=13 {
@@ -86,7 +86,7 @@ fn compass(out:&mut [u8],heading:f64) {
 pub fn rasterize(yaw:f32,x:f64,y:f64,z:f64,fps:f32,frame_ms:f32) -> Vec<u8> {
     let mut out=vec![0u8;(WIDTH*HEIGHT*4) as usize];
     compass(&mut out,heading_degrees(yaw));
-    fill(&mut out,INFO_X,0,320,HEIGHT as i32,PANEL_BG);
+    fill(&mut out,INFO_X,0,320,92,PANEL_BG);
     text(&mut out,INFO_X+12,8,&format!("FPS {:5.1}  {:5.1} ms",fps,frame_ms),ACCENT,1);
     text(&mut out,INFO_X+12,28,&format!("X {:+8.0}  Y {:+8.0}",centered_coordinate(x),centered_coordinate(y)),WHITE,1);
     text(&mut out,INFO_X+12,47,&format!("Z {:+7.0} m",z),WHITE,1);
@@ -127,5 +127,43 @@ mod tests {
         let pixels=rasterize(0.0,512000.0,512000.0,128.0,60.0,16.7);
         assert_eq!(pixels.len(),(WIDTH*HEIGHT*4) as usize);
         assert!(pixels.iter().any(|&v|v>0));
+    }
+}
+
+/// Bottom survival panel shares the existing atlas; no additional UI framework.
+pub fn survival_panel(out:&mut [u8],s:&crate::survival::Survival,message:&str,target:&str,mining:f32) {
+    use crate::survival::{ITEMS,RECIPES};
+    fill(out,0,100,736,240,PANEL_BG);
+    text(out,12,108,&format!("HP {:3.0}   FOOD {:3.0}   WATER {:3.0}   STAMINA {:3.0}",s.health,s.hunger,s.thirst,s.stamina),ACCENT,1);
+    text(out,12,126,&format!("Selected: {} x{} | Looking at: {} | Mining {:.1}s",s.selected_item().name(),s.count(s.selected_item()),target,mining),WHITE,1);
+    for (index,item) in ITEMS.iter().enumerate() {
+        let col=index/7;let row=index%7;
+        text(out,12+col as i32*210,146+row as i32*12,&format!("{} {:<15} {:3}",if index==s.selected {">"}else{" "},item.name(),s.count(*item)),if index==s.selected {ACCENT}else{MUTED},1);
+    }
+    text(out,440,146,"Tool durability",ACCENT,1);
+    for (row,(label,n)) in [("Stone pick",s.stone_pick_uses),("Stone axe",s.stone_axe_uses),("Copper pick",s.copper_pick_uses)].iter().enumerate(){
+        text(out,440,162+row as i32*14,&format!("{label}: {n}"),MUTED,1);
+    }
+    let r=&RECIPES[s.recipe];
+    let costs=r.cost.iter().map(|(i,n)|format!("{} {}",n,i.name())).collect::<Vec<_>>().join(" + ");
+    text(out,12,238,&format!("Recipe {}/{}: {}{}",s.recipe+1,RECIPES.len(),r.name,if r.fire {" (campfire nearby)"}else{""}),ACCENT,1);
+    text(out,12,252,&format!("Needs: {costs}"),WHITE,1);
+    let status=if s.dead(){"YOU DIED. Enter: respawn (lose carried items; keep world)"}else{message};
+    text(out,12,272,&status.chars().take(88).collect::<String>(),ACCENT,1);
+    text(out,12,294,"Q/E select | 1-5 blocks | Tab next recipe | C craft | F eat | R drink",MUTED,1);
+    text(out,12,310,"WASD move | Space jump | Hold LMB gather | RMB place | F5 save | Esc cursor",MUTED,1);
+    text(out,12,326,"Auto-save every 60s and on exit. Gather leaves for food and fiber.",MUTED,1);
+}
+
+#[cfg(test)] mod survival_hud_tests {
+    use super::*;
+    #[test] fn survival_panel_renders_without_overwriting_compass() {
+        let mut atlas=rasterize(0.0,0.0,0.0,120.0,60.0,16.7);
+        let compass=atlas[..(WIDTH*92*4) as usize].to_vec();
+        let mut s=crate::survival::Survival::default();
+        s.recipe=crate::survival::RECIPES.len()-1;
+        survival_panel(&mut atlas,&s,"World saved","CopperOre",1.0);
+        assert_eq!(&atlas[..compass.len()],compass);
+        assert!(atlas[(WIDTH*100*4) as usize..].iter().any(|&v|v!=0));
     }
 }

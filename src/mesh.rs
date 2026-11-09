@@ -67,12 +67,8 @@ fn block(t: &Terrain, x:i32, y:i32, z:i32, height:i32) -> Block {
     }
     // Excavated air starts dry regardless of elevation.
     if t.edits.contains_key(&cell) {return Block::Air;}
-    if z>height {
-        if z<=SEA_LEVEL {Block::Water} else {Block::Air}
-    } else if z==height {
-        if height<SEA_LEVEL {Block::Dirt} else {Block::Grass}
-    } else if z>=height-3 {Block::Dirt}
-    else {Block::Stone}
+    if z>height && z<=SEA_LEVEL {Block::Water}
+    else {t.natural_block(x,y,z,height)}
 }
 
 fn tile(b: Block, face: usize) -> u32 {
@@ -83,6 +79,11 @@ fn tile(b: Block, face: usize) -> u32 {
         Block::Stone => 3,
         Block::Water => 4,
         Block::Air => 0,
+        Block::Wood => 5,
+        Block::Leaves => 6,
+        Block::Planks => 7,
+        Block::Campfire => 8,
+        Block::CopperOre => 9,
     }
 }
 
@@ -102,7 +103,7 @@ pub fn build(t: &Terrain, center_x: i32, center_y: i32, radius: i32) -> Mesh {
                 for lx in -1..=32 {
                     let h = t.height(base_x + lx, base_y + ly);
                     heights[(ly + 1) as usize][(lx + 1) as usize] = h;
-                    max_height = max_height.max(h);
+                    max_height = max_height.max(h+6);
                 }
             }
             // Keep edited underground tunnels visible without scanning the solid core.
@@ -235,5 +236,24 @@ mod water_mesh_tests {
         let m=build(&t,x,y,0);
         assert!(m.indices.len()>m.water_index_start as usize);
         assert_eq!(t.water_liters(x,y,240),800);
+    }
+}
+
+#[cfg(test)] mod survival_mesh_tests {
+    use super::*;
+    #[test] fn render_and_collision_agree_for_resources_and_edits() {
+        let mut t=Terrain::new();
+        let base=crate::terrain::WORLD_SIZE/2;
+        for y in base..base+32 {for x in base..base+32 {
+            let h=t.height(x,y);
+            for z in h-5..=h+7 {assert_eq!(block(&t,x,y,z,h),t.block(x,y,z));}
+        }}
+        for (i,b) in [Block::Wood,Block::Leaves,Block::Planks,Block::Campfire,Block::CopperOre].iter().enumerate() {
+            let x=base+i as i32;t.set(x,base,240,*b);
+            assert_eq!(block(&t,x,base,240,t.height(x,base)),*b);
+        }
+        let mesh=build(&t,base,base,0);
+        for material in 5..=9 {assert!(mesh.vertices.iter().any(|v|v.tile==material));}
+        assert!(mesh.vertices.iter().all(|v|v.tile<10));
     }
 }

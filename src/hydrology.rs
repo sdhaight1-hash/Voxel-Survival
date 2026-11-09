@@ -200,7 +200,7 @@ mod tests {
         assert_eq!(t.block(x,y,240),Block::Stone);
         assert_eq!(t.water_liters(x,y,240),0);
         assert_eq!(t.water_liters(x,y,241),750);
-        assert_eq!(before,t.water.amounts.values().map(|&v|v as u32).sum());
+        assert_eq!(before,t.water.amounts.values().map(|&v|v as u32).sum::<u32>());
     }
 
     #[test]
@@ -212,7 +212,7 @@ mod tests {
         let before:u32=t.water.amounts.values().map(|&v|v as u32).sum();
         assert!(t.try_place_solid((x,y,232),Block::Dirt));
         assert_eq!(t.block(x,y,232),Block::Dirt);
-        assert_eq!(before,t.water.amounts.values().map(|&v|v as u32).sum());
+        assert_eq!(before,t.water.amounts.values().map(|&v|v as u32).sum::<u32>());
     }
 
     #[test]

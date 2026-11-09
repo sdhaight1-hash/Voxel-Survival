@@ -1,6 +1,6 @@
-# Voxel Survival — Vulkan prototype
+# Voxel Survival — survival development build
 
-A minimal first-person voxel survival world using **Rust**, **WGPU 0.20**, **Vulkan only**, and **winit**. Art is procedurally generated at startup: original 16×16 dirt, grass-top, grass-side, stone, and water pixel tiles, inspired by earthy survival-game palettes (not copied from Vintage Story).
+An early first-person voxel survival world using **Rust**, **WGPU 0.20**, **Vulkan only**, and **winit**. Art is procedurally generated at startup: original 16×16 dirt, grass-top, grass-side, stone, water, wood, leaves, planks, campfire and copper ore pixel tiles, inspired by earthy survival-game palettes (not copied from Vintage Story).
 
 ## Run
 
@@ -12,6 +12,37 @@ cargo run --release
 
 Debug builds also work with `cargo run`, but initial terrain meshing is significantly slower.
 
+## Survival development branch
+
+This branch adds the first playable gathering/crafting/survival loop and persistent
+worlds. It is **not the completed game**. The separate island hydrology experiment
+remains in draft PR #12. See [implementation ledger](docs/GAME_IMPLEMENTATION.md)
+for completed features, provisional choices, remaining systems and playtest criteria.
+
+Gather wood from trunks, fiber/berries from leaves, and stone from exposed rock.
+Craft tools to mine faster, build a shelter, make a campfire, cook berries, and
+progress to a copper pick. Copper ore requires a pick. Hunger/thirst decrease over
+playtime; eat with F and drink while looking at water with R. High food/water
+regenerates health; starvation, dehydration and large falls damage health.
+Enter respawns after death, losing inventory but retaining the edited world.
+
+Worlds load automatically from `saves/default` relative to the launch directory.
+F5 saves manually; the game saves every 60 seconds and on normal close. An invalid
+save stops startup and remains untouched. A failed exit save leaves the game open
+so it can be retried. Only one game process can open a world at a time.
+
+Use a separate directory for another world:
+
+```sh
+cargo run --release -- --world saves/second-world
+```
+
+Snapshots currently use a bounded JSON format (256 MiB maximum); large-region
+incremental storage and background saving are future work. The save identifies the
+generator version and rejects incompatible builds; no migration is promised yet.
+Forced termination can lose changes since the last save. Neither main nor the
+island lab previously supported saves, and these new saves target this branch only.
+
 ## Controls
 
 | Input | Action |
@@ -20,9 +51,14 @@ Debug builds also work with `cargo run`, but initial terrain meshing is signific
 | Mouse | Look |
 | W / A / S / D | Move |
 | Space | Jump |
-| Left click | Break targeted block |
-| Right click | Place selected block |
-| 1 / 2 / 3 | Select dirt / grass / stone |
+| Hold left click | Gather targeted block; tools affect mining time |
+| Right click | Place selected inventory block |
+| 1 / 2 / 3 / 4 / 5 | Select dirt / stone / wood / planks / campfire |
+| Q / E | Previous / next inventory item |
+| Tab / C | Next recipe / craft selected recipe |
+| F / R | Eat food / drink targeted water |
+| F5 | Save world |
+| Enter after death | Respawn, losing carried inventory |
 | Escape | Release mouse |
 
 ## On-screen HUD
@@ -50,7 +86,7 @@ The first click captures the mouse; subsequent clicks edit blocks. Maximum reach
 - **Vertical:** Z=0..255 (256 blocks); **sea level Z=110**, with alpha-blended finite-volume surface and side tiles.
 - **Player:** collision body 1.3 meters high, 0.56 meters wide; first-person camera 1.18 meters above feet.
 - **Terrain:** seamless multi-scale periodic 4D noise; collision-tested dry-land spawn with neighboring camera clearance; stone, dirt, grass; finite initialized ocean water. Regional plate-boundary, wind-belt, rain-shadow and solar-energy models are available but geological and climate evolution are not yet coupled into terrain generation.
-- **Streaming:** seven-by-seven nearby chunk-column window; existing GPU meshes are retained during movement and only newly entered or locally modified columns are remeshed. Edits and water overrides remain in memory for the session.
+- **Streaming:** seven-by-seven nearby chunk-column window; existing GPU meshes are retained during movement and only newly entered or locally modified columns are remeshed. Edits and water overrides are preserved in world snapshots.
 
 ## Simulation progress
 
@@ -74,9 +110,9 @@ for dependencies, physical invariants, the milestone roadmap and acceptance test
 ## Current limitations
 
 This is a playable **technical prototype**, not a finished survival game.
-There are no persistent saves, caves, inventory, groundwater, actual moving
-tectonic plates, atmospheric moisture advection, realistic pressure-driven
-water flow, or full climate/weather yet. Initial terrain is still procedural
+There are no caves, groundwater, actual moving tectonic plates, atmospheric
+moisture advection, realistic pressure-driven water flow, farming, NPCs, combat,
+or full climate/weather yet. Inventory and persistent snapshots are implemented. Initial terrain is still procedural
 noise; the tectonic uplift model is a tested regional primitive not yet used
 to build the height map. Water visuals now cull internal faces between unequal fluid levels but still lack sorted transparency and no underwater shading
 exists. First-time chunk meshing and edits are still synchronous, although
