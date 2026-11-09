@@ -3,6 +3,8 @@ mod terrain;
 mod hydrology;
 mod geoscience;
 mod hud;
+mod survival;
+mod save;
 
 use std::{collections::{HashMap,HashSet}, sync::Arc, time::Instant};
 use bytemuck::{Pod, Zeroable};
@@ -253,8 +255,8 @@ fn pixel_noise(x: u32, y: u32, tile: u32) -> u32 {
     n ^ (n >> 16)
 }
 fn texture_pixels() -> Vec<u8> {
-    let mut pixels = Vec::with_capacity(16 * 16 * 5 * 4);
-    for tile in 0..5 {
+    let mut pixels = Vec::with_capacity(16 * 16 * 10 * 4);
+    for tile in 0..10 {
         for y in 0..16 {
             for x in 0..16 {
                 let noise = (pixel_noise(x,y,tile) % 43) as i32 - 21;
@@ -265,7 +267,13 @@ fn texture_pixels() -> Vec<u8> {
                     2 if y < 4 + (pixel_noise(x,0,tile) % 3) => [n(72),n(110),n(42)],
                     2 => [n(115),n(78),n(45)], // grass side: turf over soil
                     3 => [n(111),n(111),n(106)], // stone: cool gray flecks
-                    _ => [n(41),n(78),n(124)], // water
+                    4 => [n(41),n(78),n(124)], // water
+                    5 => [n(84+(x%4) as i32*9),n(54),n(30)],
+                    6 => [n(44),n(85),n(38)],
+                    7 => [n(if y%5==0 {75}else{147}),n(95),n(51)],
+                    8 => [n(185),n(72),n(24)],
+                    _ if pixel_noise(x,y,tile)%5==0 => [n(154),n(91),n(51)],
+                    _ => [n(95),n(104),n(97)],
                 };
                 pixels.extend_from_slice(&[color[0],color[1],color[2],255]);
             }
@@ -302,7 +310,12 @@ struct Game {
     mesh_origin: (i32, i32),
     terrain: Terrain,
     player: Player,
-    selected: Block,
+    survival: survival::Survival,
+    store: save::WorldStore,
+    last_save: Instant,
+    message: String,
+    mining_held: bool,
+    mining: Option<((i32,i32,i32),f32)>,
     keys: HashSet<KeyCode>,
     mouse_captured: bool,
     last_frame: Instant,
@@ -330,7 +343,7 @@ fn depth_view(device: &wgpu::Device, size: PhysicalSize<u32>) -> wgpu::TextureVi
 }
 
 impl Game {
-    async fn new(window: Arc<winit::window::Window>) -> Self {
+    async fn new(window: Arc<winit::window::Window>, store: save::WorldStore, loaded: Option<save::Snapshot>) -> Self {
         // Explicit Vulkan backend as requested; no OpenGL/DX12 fallback.
         let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
             backends: wgpu::Backends::VULKAN, ..Default::default()
@@ -379,7 +392,7 @@ impl Game {
         });
         let texture = device.create_texture(&wgpu::TextureDescriptor {
             label: Some("original 16x16 pixel textures"),
-            size: wgpu::Extent3d { width:16, height:16, depth_or_array_layers:5 },
+            size: wgpu::Extent3d { width:16, height:16, depth_or_array_layers:10 },
             mip_level_count:1, sample_count:1, dimension:wgpu::TextureDimension::D2,
             format:wgpu::TextureFormat::Rgba8UnormSrgb,
             usage:wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
@@ -389,7 +402,7 @@ impl Game {
             wgpu::ImageCopyTexture { texture:&texture, mip_level:0, origin:wgpu::Origin3d::ZERO, aspect:wgpu::TextureAspect::All },
             &texture_pixels(),
             wgpu::ImageDataLayout { offset:0, bytes_per_row:Some(64), rows_per_image:Some(16) },
-            wgpu::Extent3d {width:16,height:16,depth_or_array_layers:5},
+            wgpu::Extent3d {width:16,height:16,depth_or_array_layers:10},
         );
         let texture_view = texture.create_view(&wgpu::TextureViewDescriptor {
             dimension: Some(wgpu::TextureViewDimension::D2Array), ..Default::default()
@@ -556,8 +569,10 @@ impl Game {
             }),
             multisample:Default::default(),multiview:None,
         });
-        let terrain = Terrain::new();
-        let player = find_safe_spawn(&terrain);
+        let terrain = loaded.as_ref().map(|s|s.restore_terrain().expect("validated save")).unwrap_or_else(Terrain::new);
+        let player = loaded.as_ref().map(|s|Player{pos:DVec3::from_array(s.position),
+            velocity_z:s.velocity_z,yaw:s.yaw,pitch:s.pitch,grounded:s.grounded})
+            .unwrap_or_else(||find_safe_spawn(&terrain));
         let depth = depth_view(&device,size);
         let chunk_offsets = device.create_buffer(&wgpu::BufferDescriptor {
             label:Some("chunk offset placeholder"),size:8,
@@ -569,12 +584,16 @@ impl Game {
             depth,
             camera_buffer,camera_bind,texture_bind,
             chunks:Vec::new(),chunk_offsets,
-            mesh_origin:(0,0),terrain,player,selected:Block::Dirt,
+            mesh_origin:(0,0),terrain,player,
+            survival:loaded.as_ref().map(|s|s.survival.clone()).unwrap_or_default(),
+            store,last_save:Instant::now(),message:"Gather wood, leaves and stone. Tab selects recipes; C crafts.".into(),
+            mining_held:false,mining:None,
             keys:HashSet::new(),mouse_captured:false,last_frame:Instant::now(),
             hud_frame_seconds:0.0,hud_elapsed:0.0,hud_frames:0,hud_fps:0.0,hud_frame_ms:0.0,
-            physics_accumulator:0.0,water_accumulator:0.0,
-            world_time_seconds:0.0,
-            surface_temperature:geoscience::ThermalCell {temperature_c:15.0},
+            physics_accumulator:loaded.as_ref().map_or(0.0,|s|s.physics_accumulator),
+            water_accumulator:loaded.as_ref().map_or(0.0,|s|s.water_accumulator),
+            world_time_seconds:loaded.as_ref().map_or(0.0,|s|s.world_seconds),
+            surface_temperature:geoscience::ThermalCell {temperature_c:loaded.as_ref().map_or(15.0,|s|s.temperature_c)},
             sunlight:1.0,
         };
         game.rebuild();
@@ -648,9 +667,11 @@ impl Game {
         }
     }
     fn upload_hud(&self) {
-        let data=hud::rasterize(self.player.yaw,self.player.pos.x,
+        let mut data=hud::rasterize(self.player.yaw,self.player.pos.x,
             self.player.pos.y,self.player.pos.z,
             self.hud_fps,self.hud_frame_ms);
+        let target=target_block(&self.terrain,&self.player).map(|(c,_)|format!("{:?}",self.terrain.block(c.0,c.1,c.2))).unwrap_or_else(||"Air".into());
+        hud::survival_panel(&mut data,&self.survival,&self.message,&target,self.mining.map_or(0.0,|(_,v)|v));
         self.queue.write_texture(
             wgpu::ImageCopyTexture {
                 texture:&self.hud_texture,mip_level:0,
@@ -706,7 +727,14 @@ impl Game {
         self.physics_accumulator += frame_dt;
         let mut ticks = 0;
         while self.physics_accumulator >= PHYSICS_DT && ticks < 12 {
-            update_player(&mut self.player, &self.terrain, &self.keys, PHYSICS_DT);
+            if !self.survival.dead() {
+                let impact=self.player.velocity_z;
+                update_player(&mut self.player, &self.terrain, &self.keys, PHYSICS_DT);
+                if self.player.grounded && impact < -12.0 {
+                    self.survival.health=(self.survival.health-(-impact-12.0) as f32*4.0).max(0.0);
+                }
+                self.survival.tick(PHYSICS_DT,horizontal_direction(&self.player,&self.keys).length_squared()>0.0);
+            }
             self.physics_accumulator -= PHYSICS_DT;
             ticks += 1;
         }
@@ -719,6 +747,15 @@ impl Game {
             let dirty=self.terrain.take_water_dirty();
             if !dirty.is_empty() {self.refresh_edited_chunks(&dirty);}
         }
+        if self.mining_held && !self.survival.dead() {
+            if let Some((cell,_))=target_block(&self.terrain,&self.player) {
+                let elapsed=self.mining.filter(|(c,_)|*c==cell).map_or(0.0,|(_,v)|v)+frame_dt;
+                let needed=self.survival.mining_seconds(self.terrain.block(cell.0,cell.1,cell.2));
+                self.mining=Some((cell,elapsed));
+                if elapsed>=needed {self.edit(MouseButton::Left);self.mining=None;}
+            } else {self.mining=None;}
+        }
+        if self.last_save.elapsed().as_secs()>=60 {self.save_world();}
         let cx = (self.player.pos.x as i32).div_euclid(32) * 32;
         let cy = (self.player.pos.y as i32).div_euclid(32) * 32;
         if (cx,cy) != self.mesh_origin { self.rebuild(); }
@@ -736,15 +773,74 @@ impl Game {
         };
         self.queue.write_buffer(&self.camera_buffer,0,bytemuck::bytes_of(&uniform));
     }
+    fn save_world(&mut self)->bool {
+        let snapshot=save::Snapshot::capture(&self.terrain,&self.player,&self.survival,
+            self.world_time_seconds,self.surface_temperature.temperature_c,self.physics_accumulator,self.water_accumulator);
+        self.last_save=Instant::now();
+        match self.store.save(&snapshot) {
+            Ok(())=>{self.message="World saved".into();true},
+            Err(e)=>{self.message=format!("SAVE FAILED: {e}");eprintln!("{}",self.message);false}
+        }
+    }
+    fn near_fire(&self)->bool {
+        let p=self.player.pos;
+        (-3..=3).any(|dx|(-3..=3).any(|dy|(-2..=2).any(|dz| {
+            let c=(p.x.floor() as i32+dx,p.y.floor() as i32+dy,p.z.floor() as i32+dz);
+            (dx*dx+dy*dy+dz*dz)<=9 && self.terrain.block(c.0,c.1,c.2)==Block::Campfire
+        })))
+    }
+    fn action(&mut self,code:KeyCode) {
+        use survival::{ITEM_COUNT,RECIPES};
+        if code==KeyCode::F5 {self.save_world();return;}
+        if self.survival.dead() {
+            if code==KeyCode::Enter {
+                self.survival=survival::Survival::default();self.player=find_safe_spawn(&self.terrain);
+                self.keys.clear();self.mining=None;self.mining_held=false;
+                self.rebuild();self.message="Respawned. Carried items were lost; world remains.".into();
+            }
+            return;
+        }
+        match code {
+            KeyCode::Digit1=>self.survival.selected=0,KeyCode::Digit2=>self.survival.selected=1,
+            KeyCode::Digit3=>self.survival.selected=2,KeyCode::Digit4=>self.survival.selected=5,
+            KeyCode::Digit5=>self.survival.selected=6,
+            KeyCode::KeyQ=>self.survival.selected=(self.survival.selected+ITEM_COUNT-1)%ITEM_COUNT,
+            KeyCode::KeyE=>self.survival.selected=(self.survival.selected+1)%ITEM_COUNT,
+            KeyCode::Tab=>self.survival.recipe=(self.survival.recipe+1)%RECIPES.len(),
+            KeyCode::KeyC=>{self.message=match self.survival.craft(self.near_fire()) {
+                Ok(())=>format!("Crafted {}",RECIPES[self.survival.recipe].name),Err(e)=>e.into()};},
+            KeyCode::KeyF=>{self.message=if self.survival.eat(){"Ate food"}else{"Need berries or cooked berries, and hunger"}.into();},
+            KeyCode::KeyR=>{
+                if self.survival.thirst>=100.0 {return;}
+                let eye=self.player.eye();
+                let here=(eye.x.floor() as i32,eye.y.floor() as i32,eye.z.floor() as i32);
+                let source=if self.terrain.water_liters(here.0,here.1,here.2)>0 {Some(here)}
+                    else {target_water(&self.terrain,&self.player)};
+                if let Some(c)=source {
+                    // Drinking is a simplified body->atmosphere return: retain
+                    // exact global water mass without an untracked bodily sink.
+                    let n=self.terrain.evaporate(c,1);
+                    if n>0 {self.survival.thirst=(self.survival.thirst+25.0).min(100.0);self.message="Drank water".into();}
+                    let dirty=self.terrain.take_water_dirty();self.refresh_edited_chunks(&dirty);
+                } else {self.message="Look at water within reach to drink".into();}
+            },
+            _=>{}
+        }
+    }
     fn edit(&mut self, button:MouseButton) {
+        if self.survival.dead(){return;}
         let solid_target=target_block(&self.terrain,&self.player);
         let mut changed=HashSet::new();
         match button {
             // Water is transparent to mining rays: mine the solid underneath.
             MouseButton::Left=>{
                 if let Some((hit,_))=solid_target {
-                    self.terrain.set(hit.0,hit.1,hit.2,Block::Air);
-                    changed.insert(hit);
+                    if hit.2==0 {self.message="Bedrock cannot be mined".into();return;}
+                    let b=self.terrain.block(hit.0,hit.1,hit.2);
+                    match self.survival.harvest(b) {
+                        Ok(())=>{self.terrain.set(hit.0,hit.1,hit.2,Block::Air);changed.insert(hit);self.message=format!("Gathered {b:?}");},
+                        Err(e)=>{self.message=e.into();}
+                    }
                 }
             }
             MouseButton::Right=>{
@@ -752,10 +848,12 @@ impl Game {
                 // placement in visible water when no solid can be targeted.
                 let placement=solid_target.map(|(_,empty)|empty)
                     .or_else(||target_water(&self.terrain,&self.player));
-                if let Some(cell)=placement {
+                let item=self.survival.selected_item();
+                if let (Some(cell),Some(block))=(placement,item.block()) {
+                    if self.survival.count(item)==0 {self.message="No selected blocks in inventory".into();return;}
                     if !player_overlaps_cell(&self.player,cell)
-                        && self.terrain.try_place_solid(cell,self.selected) {
-                        changed.insert(cell);
+                        && self.terrain.try_place_solid(cell,block) {
+                        self.survival.consume(item,1);changed.insert(cell);self.message=format!("Placed {}",item.name());
                     }
                 }
             }
@@ -828,12 +926,21 @@ impl Game {
 }
 
 fn main() {
+    let mut args=std::env::args_os().skip(1);
+    let directory=match args.next() {
+        None=>std::path::PathBuf::from("saves/default"),
+        Some(flag) if flag=="--world"=>match args.next() {Some(p)=>p.into(),None=>{eprintln!("Usage: voxel-survival [--world DIRECTORY]");return;}},
+        _=>{eprintln!("Usage: voxel-survival [--world DIRECTORY]");return;}
+    };
+    if args.next().is_some(){eprintln!("Usage: voxel-survival [--world DIRECTORY]");return;}
+    let store=match save::WorldStore::open(&directory){Ok(s)=>s,Err(e)=>{eprintln!("Cannot open world: {e}");return;}};
+    let loaded=match store.load(){Ok(s)=>s,Err(e)=>{eprintln!("Cannot load world; existing save preserved: {e}");return;}};
     let event_loop = EventLoop::new().expect("Event loop");
     let window = Arc::new(WindowBuilder::new()
-        .with_title("Voxel Survival | WASD Move | Space Jump | Click capture | Left mine | Right place | 1 Dirt 2 Grass 3 Stone | Esc release")
+        .with_title("Voxel Survival | Hold LMB gather | RMB build | Tab recipe | C craft | F eat | R drink | F5 save")
         .with_inner_size(PhysicalSize::new(1280,720))
         .build(&event_loop).expect("Window"));
-    let mut game = pollster::block_on(Game::new(window.clone()));
+    let mut game = pollster::block_on(Game::new(window.clone(),store,loaded));
     event_loop.run(move |event, target| {
         match event {
             Event::DeviceEvent {event:DeviceEvent::MouseMotion {delta},..} if game.mouse_captured => {
@@ -841,28 +948,27 @@ fn main() {
                 game.player.pitch = (game.player.pitch - delta.1 as f32 * MOUSE_SENSITIVITY).clamp(-1.54,1.54);
             }
             Event::WindowEvent {event,window_id} if window_id == window.id() => match event {
-                WindowEvent::CloseRequested => target.exit(),
+                WindowEvent::CloseRequested => {
+                    if game.save_world(){target.exit();}else{window.set_title("Save failed - world still open. See HUD; F5 retries.");}
+                },
                 WindowEvent::Resized(size) => game.resize(size),
                 WindowEvent::KeyboardInput {event,..} => {
                     if let PhysicalKey::Code(code) = event.physical_key {
                         if code == KeyCode::Escape && event.state == ElementState::Pressed {
                             game.mouse_captured = false;
+                            game.mining_held=false;game.mining=None;
                             let _ = window.set_cursor_grab(CursorGrabMode::None);
                             window.set_cursor_visible(true);
                         }
                         if event.state == ElementState::Pressed {
                             game.keys.insert(code);
-                            game.selected = match code {
-                                KeyCode::Digit1 => Block::Dirt,
-                                KeyCode::Digit2 => Block::Grass,
-                                KeyCode::Digit3 => Block::Stone,
-                                _ => game.selected,
-                            };
+                            if !event.repeat {game.action(code);}
+
                         } else { game.keys.remove(&code); }
                     }
                 }
                 WindowEvent::Focused(false) => {
-                    game.keys.clear();
+                    game.keys.clear();game.mining_held=false;game.mining=None;
                     game.mouse_captured = false;
                     let _ = window.set_cursor_grab(CursorGrabMode::None);
                     window.set_cursor_visible(true);
@@ -874,7 +980,11 @@ fn main() {
                             window.set_cursor_visible(false);
                             game.mouse_captured = true;
                         }
-                    } else { game.edit(button); }
+                    } else if button==MouseButton::Left {game.mining_held=true;}
+                    else {game.edit(button); }
+                }
+                WindowEvent::MouseInput {button:MouseButton::Left,state:ElementState::Released,..} => {
+                    game.mining_held=false;game.mining=None;
                 }
                 WindowEvent::RedrawRequested => {
                     game.update();
@@ -883,7 +993,7 @@ fn main() {
                         Err(wgpu::SurfaceError::Lost | wgpu::SurfaceError::Outdated) => {
                             game.resize(window.inner_size());
                         }
-                        Err(wgpu::SurfaceError::OutOfMemory) => target.exit(),
+                        Err(wgpu::SurfaceError::OutOfMemory) => {game.save_world();target.exit();},
                         Err(wgpu::SurfaceError::Timeout) => {}
                     }
                 }
